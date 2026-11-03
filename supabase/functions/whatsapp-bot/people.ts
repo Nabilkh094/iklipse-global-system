@@ -10,7 +10,7 @@
 // them has its people noted as theirs, and who's who (the team as it is now,
 // the freelancers, the partners) is given to questions, each kind apart.
 
-import { backoff, claude, iso, stillQueued, str, type ClaudeTool, type Db, type Person, type Settings, type Team } from "./kit.ts";
+import { backoff, claude, iso, str, type ClaudeTool, type Db, type Person, type Settings, type Team } from "./kit.ts";
 import type { Attendee } from "./meetings.ts";
 
 /** Sends a WhatsApp message (as a reply to quotedId, when given; mentions: the numbers tagged in it); the id of what it sent. */
@@ -437,9 +437,6 @@ export async function askNow(db: Db, s: Settings, send: Send) {
   const open = (await openAsks(db)).filter((a) => s.ask_enabled || (a.meeting && !a.client!.email));
   const needs = (a: Ask) => (s.ask_enabled ? missing(a.client!) : ["email"]);
   if (!open.length || !open.some((a) => Date.parse(a.next_at) <= Date.now())) return 0;
-  // The last one hasn't gone out yet (the phone is offline): nothing piles up behind it.
-  const { data: prev } = await db.from("bot_ask_message").select("id, chat_id, sent_at").in("chat_id", places).order("sent_at", { ascending: false }).limit(1);
-  if (await stillQueued(db, prev?.[0]?.chat_id ?? null, prev?.[0]?.id, prev?.[0]?.sent_at)) return 0;
   const list = open.slice(0, PER_MESSAGE);
   const again = list.every((a) => a.times > 0);
   const lines = list.map((a, i) => `${i + 1}. ${who(a.client!)}${a.wa_group?.name ? ` in ${a.wa_group.name}` : ""}: ${needs(a).join(", ")}${a.meeting ? " (a meeting waits on it)" : ""}`);

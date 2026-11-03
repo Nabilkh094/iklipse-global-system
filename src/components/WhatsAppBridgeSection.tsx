@@ -9,14 +9,15 @@ import { Spinner } from "@/components/ui/Spinner";
 import { useToast } from "@/components/ui/Toast";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { WhatsAppBridgeControls } from "@/components/WhatsAppBridgeControls";
-import { bridgeCode, bridgeLogout, bridgeStart, bridgeStatus, setBotProvider, type BridgeStatus } from "@/lib/watchApi";
+import { bridgeCode, bridgeLogout, bridgeStart, bridgeStatus, type BridgeStatus } from "@/lib/watchApi";
 
 // -----------------------------------------------------------------------------
 // Connected accounts > WhatsApp (admins only): the bot's own WhatsApp bridge
-// (WAHA on the claude-vps server, 0097). Start it, scan its QR code from the
-// phone's Linked devices (or type a code there), then choose whether the bot
-// uses this number or Green API. While it waits for a scan the QR code is
-// fetched again every few seconds (WhatsApp changes it).
+// (WAHA on the claude-vps server, 0097), the only way the bot reaches
+// WhatsApp. Start it, scan its QR code from the phone's Linked devices (or
+// type a code there): the bot reads and writes through that number. While it
+// waits for a scan the QR code is fetched again every few seconds (WhatsApp
+// changes it).
 // -----------------------------------------------------------------------------
 
 const KEY = ["whatsapp-bridge"];
@@ -79,20 +80,6 @@ export function WhatsAppBridgeSection() {
     onSuccess: (r) => setCode(r.code),
     onError: fail("Couldn't get a code"),
   });
-  const use = useMutation({
-    mutationFn: setBotProvider,
-    onSuccess: (r) => {
-      void qc.invalidateQueries({ queryKey: KEY });
-      void qc.invalidateQueries({ queryKey: ["watch-overview"] });
-      toast.push({
-        kind: "success",
-        title: r.provider === "waha" ? "The bot now uses this number" : "The bot is back on Green API",
-        description: "Sync the groups in Alerts > Groups so it knows which groups this number is in.",
-      });
-    },
-    onError: fail("Couldn't switch"),
-  });
-
   const s = q.data;
   const linked = s?.status === "WORKING";
   const waiting = s?.status === "SCAN_QR_CODE";
@@ -109,7 +96,7 @@ export function WhatsAppBridgeSection() {
             WhatsApp bridge
           </span>
         }
-        info="The bot's own WhatsApp connection, on iklipse's server instead of Green API. Link a number by scanning its QR code from the phone, then choose which one the bot uses. Only admins see this. It isn't WhatsApp's official API: use a number you can afford to have restricted."
+        info="The bot's WhatsApp connection, on iklipse's server. Link the bot's number by scanning its QR code from the phone: the bot reads and writes through it. Only admins see this. It isn't WhatsApp's official API: use a number you can afford to have restricted."
         action={
           <Button variant="ghost" size="sm" iconLeft={<RefreshCw size={14} />} loading={q.isFetching && !q.isLoading} onClick={() => void q.refetch()}>
             Refresh
@@ -130,13 +117,12 @@ export function WhatsAppBridgeSection() {
                 <div className="text-sm font-medium text-ink flex flex-wrap items-center gap-2">
                   {linked ? <span className="truncate">{pretty(s.phone)}</span> : <span>Bridge</span>}
                   {stateBadge(s)}
-                  {s.provider === "waha" && linked && <Badge tone="accent">The bot uses it</Badge>}
                 </div>
                 <div className="text-xs text-muted mt-0.5">
                   {!s.ready
                     ? "The whatsapp-bot function doesn't have the bridge's address and key (WAHA_URL, WAHA_API_KEY)."
                     : linked
-                      ? `${s.name ? `${s.name} · ` : ""}${s.provider === "waha" ? "The bot reads and writes through this number." : "Linked. The bot still uses Green API."}`
+                      ? `${s.name ? `${s.name} · ` : ""}The bot reads and writes through this number.`
                       : off
                         ? "Start it, then scan its QR code from the phone."
                         : waiting
@@ -150,43 +136,6 @@ export function WhatsAppBridgeSection() {
                     Start the bridge
                   </Button>
                 )}
-                {linked && s.provider !== "waha" && (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    className="max-sm:h-10"
-                    loading={use.isPending}
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: `Let the bot use ${pretty(s.phone)}?`,
-                        message:
-                          "From now on the bot reads groups and private chats, and writes, through this number instead of Green API. It only sees groups this number is in. You can switch back any time.",
-                        confirmLabel: "Use this number",
-                      });
-                      if (ok) use.mutate("waha");
-                    }}
-                  >
-                    Use for the bot
-                  </Button>
-                )}
-                {s.provider === "waha" && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="max-sm:h-10"
-                    loading={use.isPending}
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: "Back to Green API?",
-                        message: "The bot reads and writes through the Green API number again. This number stays linked.",
-                        confirmLabel: "Back to Green API",
-                      });
-                      if (ok) use.mutate("green");
-                    }}
-                  >
-                    Back to Green API
-                  </Button>
-                )}
                 {(linked || waiting) && (
                   <Button
                     variant="secondary"
@@ -198,14 +147,12 @@ export function WhatsAppBridgeSection() {
                       const ok = await confirm({
                         title: linked ? `Unlink ${pretty(s.phone)}?` : "Start over?",
                         message: linked
-                          ? `It leaves the phone's Linked devices.${s.provider === "waha" ? " The bot uses this number now: it goes back to Green API first." : ""} You can link it, or another number, again.`
+                          ? "It leaves the phone's Linked devices, and the bot is off WhatsApp until a number is linked again. You can link it, or another number, again."
                           : "A new QR code comes.",
                         confirmLabel: linked ? "Unlink" : "Start over",
                         danger: linked,
                       });
-                      if (!ok) return;
-                      if (s.provider === "waha") await use.mutateAsync("green");
-                      logout.mutate();
+                      if (ok) logout.mutate();
                     }}
                   >
                     {linked ? "Unlink" : "Start over"}
@@ -265,7 +212,7 @@ export function WhatsAppBridgeSection() {
           )}
         </div>
       </Section>
-      {s?.ready && <WhatsAppBridgeControls linked={linked} botUses={s.provider === "waha"} />}
+      {s?.ready && <WhatsAppBridgeControls linked={linked} />}
     </div>
   );
 }

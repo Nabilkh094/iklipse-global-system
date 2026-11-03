@@ -150,8 +150,8 @@ test("a client group: what isn't in their message, the alert or the group's talk
 
 test("WhatsApp refusing it is said back", async () => {
   const f = world();
-  const said = await postInGroup(f.db, sender("WhatsApp (Green API): not authorized").send, { admin: true }, { group: "key team", text: "Standup in 5.", tag: [], said: [] });
-  assert.equal(said, "Couldn't post in iklipse Key Team: WhatsApp (Green API): not authorized");
+  const said = await postInGroup(f.db, sender("WhatsApp: not authorized").send, { admin: true }, { group: "key team", text: "Standup in 5.", tag: [], said: [] });
+  assert.equal(said, "Couldn't post in iklipse Key Team: WhatsApp: not authorized");
 });
 
 // ---------------------------------------------------------- the router --

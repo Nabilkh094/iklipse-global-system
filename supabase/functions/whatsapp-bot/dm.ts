@@ -14,7 +14,7 @@
 // theirs. The team's own private messages aren't answered here (orders.ts).
 // Always English.
 
-import { backoff, cairoStamp, claude, iso, MIN, stillQueued, str, tally, type ClaudeTool, type Db, type Settings, type Team } from "./kit.ts";
+import { backoff, cairoStamp, claude, iso, MIN, str, tally, type ClaudeTool, type Db, type Settings, type Team } from "./kit.ts";
 import { askPlaces, firstTime, phoneKey, type Send } from "./people.ts";
 import { historyOf } from "./history.ts";
 import { meetingsOf, type Attendee } from "./meetings.ts";
@@ -714,9 +714,7 @@ export async function remindDrafts(db: Db, s: Settings, send: Send) {
       await db.from("bot_draft").update({ status: "expired", decided_at: iso(), next_at: null }).eq("id", d.id);
       continue;
     }
-    // The last one hasn't gone out yet (the phone is offline): nothing piles up behind it.
     const chats = d.ask_chats?.length ? d.ask_chats : d.ask_chat ? [d.ask_chat] : [];
-    if (await stillQueued(db, chats.at(-1) ?? null, d.ask_ids.at(-1), d.created_at)) continue;
     const ids: string[] = [];
     if (chats.length) {
       // A reply the guard catches doesn't go on a plain OK (decideDraft).

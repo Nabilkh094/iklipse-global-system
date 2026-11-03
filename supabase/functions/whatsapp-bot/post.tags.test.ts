@@ -65,11 +65,11 @@ test("WAHA's sendText gets the numbers as mentions; none, no mentions at all", (
 });
 
 // index.ts can't be loaded here (it serves): its source is read instead.
-test("index.ts and waha.ts: the bot's message hands the numbers tagged to WAHA's sendText (only on WAHA)", () => {
+test("index.ts and waha.ts: the bot's message hands the numbers tagged to WAHA's sendText", () => {
   const index = readFileSync("supabase/functions/whatsapp-bot/index.ts", "utf8");
   assert.match(index, /async \(chatId, said, quotedId, mentions\) => \{/);
-  assert.match(index, /const tags = cfg\.provider === "waha" && mentions\?\.length \? \{ mentions \} : \{\};/);
-  assert.match(index, /green<\{ idMessage\?: string \}>\(cfg, "sendMessage", \{ chatId, message: text, [^\n]*linkPreview: false, \.\.\.tags \}\)/);
+  assert.match(index, /const tags = mentions\?\.length \? \{ mentions \} : \{\};/);
+  assert.match(index, /wahaCall<\{ idMessage\?: string \}>\("sendMessage", \{ chatId, message: text, [^\n]*linkPreview: false, \.\.\.tags \}\)/);
   const waha = readFileSync("supabase/functions/whatsapp-bot/waha.ts", "utf8");
   assert.match(waha, /waha<\{ id\?: unknown \}>\("POST", "\/api\/sendText", sendTextBody\(chatId, text, reply_to, body\?\.mentions\)\)/);
 });

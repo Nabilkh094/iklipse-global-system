@@ -94,9 +94,9 @@ test("what goes wrong is said, and where it stopped", async () => {
   assert.match(noPhone.problem!, /I don't have Rabah's WhatsApp number/);
 
   const f = fakeDb({ bot_order: [] });
-  const failed = await giveOrder(f.db, s, sender("WhatsApp (Green API): not authorized").send, at, by, "t", rabah, x);
+  const failed = await giveOrder(f.db, s, sender("WhatsApp: not authorized").send, at, by, "t", rabah, x);
   assert.equal(failed.stage, "send");
-  assert.match(failed.problem!, /Couldn't send it to Rabah: WhatsApp \(Green API\): not authorized/);
+  assert.match(failed.problem!, /Couldn't send it to Rabah: WhatsApp: not authorized/);
   assert.equal(f.tables.bot_order[0].status, "failed");
 
   const down = fakeDb({ bot_order: [] }, { fail: (c) => (c.op === "insert" ? "db down" : null) });

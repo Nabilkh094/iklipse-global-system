@@ -303,7 +303,7 @@ test("in the team's group, the answer to \"I didn't send it\" is a reply to it: 
   assert.deepEqual(sent.filter((m) => m.chat === CHAT).map((m) => m.text), [RISKY]);
 });
 
-/** An edit of a message (keep.ts), as Green API sends it. */
+/** An edit of a message (keep.ts), in the bot's shape (waha.ts toHook). */
 const edited = (stanzaId: string, textMessage: string) => ({ typeMessage: "editedMessage", editedMessageData: { textMessage, stanzaId } });
 const OMAR = { sender: "201000000003@c.us", phone: "201000000003" };
 const crew = async (): Promise<Team> => ({ ...t, byPhone: new Map([[OMAR.phone, { id: "u-omar", name: "Omar", username: "omar", active: true, admin: false }]]) });
@@ -363,7 +363,7 @@ test("privately too: the person the bot asks edits their OK into \"send anyway\"
   const edit = { md: edited("ok-1", "send anyway"), chatId: TEAM_ASKS, text: "send anyway (edited)", mine: false, own: "edit-1" };
   const a = (await editOf(f.db, edit))!.answers!;
   assert.deepEqual(a, { chatId: TEAM_ASKS, quotedId: "m1", phone: null, lid: null, once: "ok-1:edit:edit-1" });
-  // An edit with the id of the one it changes (Green API may send it so): once per its words.
+  // An edit with the id of the one it changes (it may come so): once per its words.
   assert.equal((await editOf(f.db, { ...edit, own: "ok-1" }))?.answers?.once, "ok-1:edit:send anyway (edited)");
   claudeSays({ decision: "send" });
   await decideDraft(f.db, s, (await draftFor(f.db, a.chatId, a.quotedId))!, { id: "ok-1", chatId: a.chatId, text: edit.text }, send, async () => {});

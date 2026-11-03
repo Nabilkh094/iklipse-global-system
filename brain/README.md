@@ -4,7 +4,7 @@ Claude on the Agent SDK as the team's assistant on WhatsApp. It runs on the clau
 
 ## How a message gets here
 
-1. WAHA or Green API sends every message to the `whatsapp-bot` edge function, as before. The function stores it, transcribes voice notes, reads files and applies the team-group gate (`gate.ts`).
+1. WAHA (the bot's own WhatsApp bridge) sends every message to the `whatsapp-bot` edge function, as before. The function stores it, transcribes voice notes, reads files and applies the team-group gate (`gate.ts`).
 2. The function looks up the sender's tier, only through the links an admin made (`wa_member`, `wa_member_lid`):
    - **owner:** Sameh's numbers, set in Alerts > Brain;
    - **admin:** profile role admin;

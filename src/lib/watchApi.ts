@@ -132,7 +132,6 @@ export interface WatchOverview {
   settings: WatchSettings | null;
   bot: {
     configured: boolean;
-    instance: string | null;
     state: string | null;
     phone: string | null;
     hook_at: string | null;
@@ -578,15 +577,13 @@ export const botStatus = () => callFunction<{ state: string; phone: string | nul
 export const syncGroups = () => callFunction<{ groups: number; read: number }>("whatsapp-bot", { action: "sync" });
 export const testCall = () => callFunction<{ call: string }>("whatsapp-bot", { action: "test_call" });
 
-// The bot's own WhatsApp bridge (0097, WAHA on the claude-vps server): admins
-// link a number by its QR code and choose which one the bot uses.
-
-export type WaProvider = "green" | "waha";
+// The bot's own WhatsApp bridge (0097, WAHA on the claude-vps server), the
+// only way it reaches WhatsApp: admins link its number by the QR code.
 
 export interface BridgeStatus {
   /** The function has the bridge's address and key. */
   ready: boolean;
-  /** Green API's words: authorized, notAuthorized, starting, stopped, failed, notStarted. */
+  /** In the bot's words: authorized, notAuthorized, starting, stopped, failed, notStarted. */
   state: string;
   /** WAHA's own: WORKING, SCAN_QR_CODE, STARTING, STOPPED, FAILED, null before it's made. */
   status: string | null;
@@ -594,7 +591,6 @@ export interface BridgeStatus {
   name: string | null;
   /** The QR code to scan (a data: image) while it waits for one. */
   qr: string | null;
-  provider: WaProvider;
 }
 
 export const bridgeStatus = () => callFunction<BridgeStatus>("whatsapp-bot", { action: "waha_status" });
@@ -631,7 +627,7 @@ export interface BridgeInfo {
   ignore: Record<string, boolean> | null;
   /** on: the number reaches WhatsApp through a home address (WAHA_PROXY); set: the secret is there. */
   proxy: { on: boolean; set: boolean };
-  settings: (BridgeSettings & { wa_provider: WaProvider; dm_enabled: boolean }) | null;
+  settings: (BridgeSettings & { dm_enabled: boolean }) | null;
 }
 
 export const bridgeInfo = () => callFunction<BridgeInfo>("whatsapp-bot", { action: "waha_info" });
@@ -640,9 +636,6 @@ export const bridgeStop = () => callFunction<BridgeStatus>("whatsapp-bot", { act
 export const saveBridgeSettings = (settings: Partial<BridgeSettings>) => callFunction<BridgeInfo>("whatsapp-bot", { action: "waha_settings", settings });
 export const saveBridgeProfile = (profile: { name?: string; about?: string; picture?: { mimetype: string; data: string } | null }) =>
   callFunction<{ ok: boolean }>("whatsapp-bot", { action: "waha_profile", profile });
-
-export const setBotProvider = (provider: WaProvider) =>
-  callFunction<{ provider: WaProvider; bot: { state: string; phone: string | null } | null }>("whatsapp-bot", { action: "waha_use", provider });
 
 // ------------------------------------------------------------------ words --
 
@@ -654,13 +647,13 @@ export const KIND_LABEL: Record<AlertKind, string> = {
   ads: "Ads",
 };
 
-/** Green API's instance states, in plain words. */
+/** The bot's WhatsApp states, in plain words. */
 export function botStateText(state: string | null | undefined): { text: string; ok: boolean } {
   switch (state) {
     case "authorized":
       return { text: "Connected", ok: true };
     case "notAuthorized":
-      return { text: "Logged out: scan the QR code in Green API again", ok: false };
+      return { text: "Logged out: scan the QR code in Connected accounts > WhatsApp again", ok: false };
     case "blocked":
       return { text: "Blocked by WhatsApp: this number can't be used", ok: false };
     case "sleepMode":

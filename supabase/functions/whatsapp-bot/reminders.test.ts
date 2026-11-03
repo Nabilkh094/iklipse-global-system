@@ -268,7 +268,7 @@ test("sending fails: tried again after 1, 5 and 15 minutes, then whoever set it 
   );
   const sent: { chat: string; text: string }[] = [];
   const send = async (chat: string, text: string) => {
-    if (chat === "15555550101@c.us") throw new Error("Green API: 502");
+    if (chat === "15555550101@c.us") throw new Error("WAHA POST /api/sendText: 502");
     return (sent.push({ chat, text }), "w");
   };
   const people = new Map([
@@ -282,7 +282,7 @@ test("sending fails: tried again after 1, 5 and 15 minutes, then whoever set it 
     for (const row of rows) {
       assert.equal(row.status, "open");
       assert.equal(row.tries, tries);
-      assert.equal(row.error, "Green API: 502");
+      assert.equal(row.error, "WAHA POST /api/sendText: 502");
       const next = Date.parse(String(row.retry_at)) - t0;
       assert.ok(next >= wait * MIN - 1000 && next <= wait * MIN + 5000, `try ${tries}: again in ${wait} minutes`);
     }

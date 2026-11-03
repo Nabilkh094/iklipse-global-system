@@ -18,7 +18,7 @@
 // people.ts. No alerts for orders. Reminders only in working hours. Always
 // English, in the bot's voice (voice.ts).
 
-import { cairoOffset, cairoStamp, claude, claudeStep, closeAlert, env, iso, MIN, stillQueued, str, TZ, type ClaudeTool, type Db, type Person, type Settings, type Team } from "./kit.ts";
+import { cairoOffset, cairoStamp, claude, claudeStep, closeAlert, env, iso, MIN, str, TZ, type ClaudeTool, type Db, type Person, type Settings, type Team } from "./kit.ts";
 import { firstTime, partnerPeople, partners, takeAnswer, WHO_IS_WHO, whoIsWho, type Send } from "./people.ts";
 import { bookedSince, directory, type Attendee } from "./meetings.ts";
 import { answer as answerTurn, bookTurnAt, botIds, freeTimesOf, heardPrivate, named, orderedMeeting, peopleFor, privateChat } from "./book.ts";
@@ -1710,8 +1710,6 @@ export async function nagOrders(db: Db, s: Settings, send: Send, deadline: numbe
       }
       continue;
     }
-    // The last one hasn't gone out yet (the phone is offline): nothing piles up behind it.
-    if (await stillQueued(db, x.to_chat, x.sent_ids.at(-1), x.updated_at)) continue;
     try {
       await toThem(db, send, x, x.nudge || `A reminder: ${x.task}.`, { times: x.times + 1, next_at: iso(Date.now() + s.order_every_min * MIN) });
       n++;

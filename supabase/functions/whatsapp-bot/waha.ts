@@ -1,13 +1,12 @@
 // The bot's own WhatsApp bridge (0097): WAHA (devlikeapro/waha, GOWS engine)
-// on the claude-vps server, next to Green API. An admin links a number with its
-// QR code in Connected accounts > WhatsApp and chooses which one the bot uses
-// (watch_settings.wa_provider).
+// on the claude-vps server, the only way the bot reaches WhatsApp. An admin
+// links its number with the QR code in Connected accounts > WhatsApp.
 //
-// The rest of the bot speaks Green API: here WAHA's calls are made to look like
-// Green API's (call), and its webhooks are turned into Green API's (toGreen),
-// so nothing else changes. WAHA writes a message's id whole
-// (false_2010...@c.us_3EB0...); the bot keeps the short one, as Green API sends
-// it, and waha_msg holds the whole one to reply to it.
+// The rest of the bot speaks its own shape of calls and messages (getChats,
+// sendMessage, typeWebhook, idMessage...): here WAHA's calls are made in that
+// shape (wahaCall), and its webhooks turned into it (toHook). WAHA writes a
+// message's id whole (false_2010...@c.us_3EB0...); the bot keeps the short one,
+// and waha_msg holds the whole one to reply to it.
 //
 // Secrets: WAHA_URL (https://waha.2-29-53-111.sslip.io), WAHA_API_KEY,
 // WAHA_SESSION (default "default"), WAHA_PROXY (optional: the number reaches
@@ -57,7 +56,7 @@ interface Session {
   me?: { id?: string; pushName?: string } | null;
 }
 
-/** WAHA's session states, as Green API's (what the Alerts page knows). */
+/** WAHA's session states, in the bot's words (what the Alerts page knows). */
 export function stateOf(status: unknown): string {
   switch (str(status)) {
     case "WORKING":
@@ -237,7 +236,7 @@ export async function wahaInfo(db: Db, hookUrl: string) {
     waha<{ name?: string; picture?: string | null }>("GET", `/api/${SESSION}/profile`).then((r) => r.data).catch(() => null),
     db
       .from("watch_settings")
-      .select("reply_quiet_sec, reply_max_sec, group_quiet_sec, group_max_sec, wa_seen, wa_typing, typing_cps, typing_min_sec, typing_max_sec, wa_online, wa_provider, dm_enabled")
+      .select("reply_quiet_sec, reply_max_sec, group_quiet_sec, group_max_sec, wa_seen, wa_typing, typing_cps, typing_min_sec, typing_max_sec, wa_online, dm_enabled")
       .eq("id", 1)
       .single(),
   ]);
@@ -318,7 +317,7 @@ export async function wahaSettings(db: Db, patch: Record<string, unknown>) {
   }
 }
 
-// ------------------------------------------------------ Green API's calls --
+// ---------------------------------------------------------- the bot's calls --
 
 // ----------------------------------------------------------- what was missed --
 
@@ -337,8 +336,8 @@ interface WaMessage {
  * The messages of the last hour the bridge has and the bot never got (its
  * webhook lost: the function down longer than WAHA's retries), as the webhook
  * would have sent them, oldest first. A message the bot got is in waha_msg
- * (toGreen keeps every one), or kept by its id (wa_dm, wa_message: one that
- * came while the bot was on Green API). A file's message is asked for again
+ * (toHook keeps every one), or kept by its id (wa_dm, wa_message: one that
+ * came before waha_msg was). A file's message is asked for again
  * with its file, as the webhook gives it.
  */
 export async function wahaMissed(db: Db, now = Date.now()): Promise<Record<string, unknown>[]> {
@@ -380,7 +379,7 @@ async function fullId(db: Db, id: string) {
   return (data?.full_id as string | undefined) ?? null;
 }
 
-/** "false_2010...@c.us_3EB0..._2011...@lid" -> "3EB0..." (Green API's id). */
+/** "false_2010...@c.us_3EB0..._2011...@lid" -> "3EB0..." (the id the bot keeps). */
 export function shortId(id: unknown) {
   const s = str(id);
   const p = s.split("_");
@@ -408,7 +407,7 @@ export function sendTextBody(chatId: string, text: string, reply_to: string | nu
   return { session: SESSION, chatId, text, linkPreview: false, ...(reply_to ? { reply_to } : {}), ...(tags.length ? { mentions: tags.map((n) => `${n}@c.us`) } : {}) };
 }
 
-/** One of Green API's calls the bot makes, made on WAHA, answered the way Green API answers. */
+/** One of the bot's calls, made on WAHA, answered in the bot's shape. */
 export async function wahaCall<T>(method: string, body?: Record<string, unknown>): Promise<T> {
   const db = serviceClient();
   switch (method) {
@@ -484,7 +483,7 @@ export async function wahaCall<T>(method: string, body?: Record<string, unknown>
       return { groupId: id, subject: groupName(g.data), participants } as T;
     }
     case "getContactInfo": {
-      // As Green API's, plus phone: the number behind a lid (0100).
+      // In the bot's shape, plus phone: the number behind a lid (0100).
       const chatId = str(body?.chatId);
       // The number behind a lid is found even when the contact can't be read.
       const r = await waha<Record<string, unknown>>("GET", `/api/contacts?contactId=${encodeURIComponent(chatId)}&session=${encodeURIComponent(SESSION)}`).catch(() => ({ data: null }));
@@ -497,7 +496,7 @@ export async function wahaCall<T>(method: string, body?: Record<string, unknown>
   }
 }
 
-// ------------------------------------------------------- Green API's hook --
+// ----------------------------------------------------------- the bot's hook --
 
 /** The number behind a lid, from WAHA (what WhatsApp told it). */
 async function numberOfLid(lid: string): Promise<string | null> {
@@ -509,11 +508,11 @@ async function numberOfLid(lid: string): Promise<string | null> {
   }
 }
 
-/** What kind of message it is, in Green API's words, from what WhatsApp sent (GOWS: _data.Message). */
+/** What kind of message it is, in the bot's words, from what WhatsApp sent (GOWS: _data.Message). */
 function kindOf(p: Record<string, any>): string | null {
   const raw = (p._data?.Message ?? p._data?.message ?? {}) as Record<string, unknown>;
   const has = (k: string) => raw && typeof raw === "object" && raw[k] != null;
-  // Reactions, deletions, edits and the like: not messages (an edit comes as message.edited, toGreen).
+  // Reactions, deletions, edits and the like: not messages (an edit comes as message.edited, toHook).
   if (has("reactionMessage") || has("protocolMessage") || has("encReactionMessage") || has("editedMessage") || p._data?.IsEdit) return null;
   if (has("stickerMessage")) return "stickerMessage";
   if (has("locationMessage") || has("liveLocationMessage")) return "locationMessage";
@@ -542,11 +541,11 @@ function pollName(p: Record<string, any>) {
 }
 
 /**
- * A WAHA webhook as Green API would have sent it, or null when there's nothing
+ * A WAHA webhook in the bot's shape (index.ts Hook), or null when there's nothing
  * in it for the bot. Only message.any (people's messages and the bot's own,
  * from the phone or sent here) and session.status come.
  */
-export async function toGreen(db: Db, ev: Record<string, any>): Promise<Record<string, any> | null> {
+export async function toHook(db: Db, ev: Record<string, any>): Promise<Record<string, any> | null> {
   const event = str(ev.event);
   const me = str(ev.me?.id);
   if (event === "session.status") {
@@ -565,7 +564,7 @@ export async function toGreen(db: Db, ev: Record<string, any>): Promise<Record<s
   const id = shortId(whole);
   if (!id) return null;
   await db.from("waha_msg").upsert({ id, full_id: whole }, { onConflict: "id", ignoreDuplicates: true });
-  // An edit (0104): the new text, as Green API's editedMessage.
+  // An edit (0104): the new text, as an editedMessage.
   const edited = event === "message.edited";
   const type = edited ? (str(p.body) ? "editedMessage" : null) : kindOf(p);
   if (!type) return null;
