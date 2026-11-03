@@ -1,7 +1,7 @@
 // The words the brain sends on WhatsApp: in parts that fit, no long dashes,
 // and the short line while it works. Always in English.
 
-/** "On it.": once, when a run goes on past ~20 seconds. */
+/** "On it.": once, when a run goes on past ~45 seconds. */
 export const progressLine = (_request: string) => "On it.";
 
 /** No em or en dashes, ever. */

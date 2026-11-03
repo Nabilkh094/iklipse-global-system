@@ -15,7 +15,7 @@ import type { BotClient } from "./bot.js";
 import type { Config } from "./config.js";
 import type { GitHub } from "./github.js";
 import { hooksFor } from "./hooks.js";
-import { allowedToolsFor, builtinsFor, devRun, DISALLOWED, WEB_HOSTS, type Tier } from "./policy.js";
+import { allowedToolsFor, builtinsFor, devRun, DISALLOWED, MCP, SERVER_TOOLS, WEB_HOSTS, type Tier } from "./policy.js";
 import { listSkills, pluginsFor } from "./skills.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -37,13 +37,25 @@ export interface RunnerDeps {
   query?: Query;
   now?: () => number;
   log?: (e: Record<string, unknown>) => void;
-  /** After this long a run says it's on it (20 s). */
+  /** After this long a run says it's on it (45 s). */
   progressMs?: number;
   /** A chat's messages are gathered this long after the last one, then answered together (60 s; 0: each at once). */
   gatherMs?: number;
 }
 
 const GATHER_MS = 60_000;
+/** A run still going after this long says "On it." once. */
+const PROGRESS_MS = 45_000;
+
+/** A step that calls one of the function's tools that sends or changes something (not only reads). */
+export function actsOn(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some((b: { type?: string; name?: string }) => {
+    if (b?.type !== "tool_use" || !String(b.name).startsWith(MCP)) return false;
+    const r = SERVER_TOOLS[String(b.name).slice(MCP.length)];
+    return !!r && !r.readOnly;
+  });
+}
 
 type Status = "done" | "failed" | "stopped" | "timeout" | "budget";
 
@@ -56,7 +68,18 @@ const ENDS: Record<Exclude<Status, "done">, string> = {
 };
 /** Cut off by the brain going down for an update, not by the super admin. */
 const RESTART = "I was restarting for an update and got cut off. Send it again.";
-const endText = (s: Exclude<Status, "done">) => ENDS[s];
+/**
+ * Why a run ended without an answer, plainly: which limit it hit and how far
+ * it got, or what broke. The team hears the cause; a client only the line.
+ */
+export function endText(s: Exclude<Status, "done">, x: { client?: boolean; subtype?: string; turns?: number; maxTurns?: number; minutes?: number; costUsd?: number; error?: string | null } = {}) {
+  if (x.client) return ENDS[s];
+  if (s === "budget" && x.subtype === "error_max_turns") return `Not finished: it needed more than ${x.maxTurns ?? "the allowed"} steps, the limit for one request. Ask for a smaller part of it.`;
+  if (s === "budget" && x.subtype === "error_max_budget_usd") return `Not finished: it hit the $${x.costUsd ?? "?"} cost limit for one request${x.turns ? ` after ${x.turns} steps` : ""}. Ask for a smaller part of it.`;
+  if (s === "timeout") return `Not finished: it ran past ${x.minutes === 1 ? "1 minute" : `${x.minutes ?? "the"} minutes`}, the limit for one request${x.turns ? `, after ${x.turns} steps` : ""}. Ask for a smaller part of it.`;
+  if (s === "failed" && x.error) return `Failed before finishing: ${x.error.replace(/\s+/g, " ").slice(0, 200)}. Ask again in a minute.`;
+  return ENDS[s];
+}
 /** The answer that says nothing goes (CLAUDE.md): NO_REPLY alone. */
 export const SILENT = /^\s*NO_REPLY[.!]?\s*$/;
 /** How much Claude read for its last step: the conversation's size so far, in tokens. */
@@ -324,8 +347,9 @@ export class Runner {
     // Stopped (the kill switch) before it began: it still runs, reading only (hooks.ts, and the function).
     this.active.set(m.run_id, live);
     const timer = setTimeout(() => this.abort(m.run_id, "timeout"), s.run_minutes * 60_000);
-    // A client isn't told the bot is "on it": the answer comes, or the team's.
-    const progress = tier === "client" ? undefined : setTimeout(() => void this.d.bot.call("_reply", { run_id: m.run_id, text: progressLine(m.text), quote: true }).catch(() => null), this.d.progressMs ?? 20_000);
+    // A client isn't told the bot is "on it": the answer comes, or the team's. Nor is anyone once a tool
+    // that sends or changes something ran (it may have said it already).
+    const progress = tier === "client" ? undefined : setTimeout(() => void this.d.bot.call("_reply", { run_id: m.run_id, text: progressLine(m.text), quote: true }).catch(() => null), this.d.progressMs ?? PROGRESS_MS);
 
     let sessionId = p.resume;
     let context = 0;
@@ -356,7 +380,10 @@ export class Runner {
       };
       for await (const msg of (this.d.query ?? sdkQuery)({ prompt: promptFor(m, runNotes(s, earlier)), options })) {
         if (msg.type === "system" && msg.subtype === "init") sessionId = msg.session_id;
-        if (msg.type === "assistant") context = contextOf(msg.message.usage);
+        if (msg.type === "assistant") {
+          context = contextOf(msg.message.usage);
+          if (actsOn(msg.message.content)) clearTimeout(progress);
+        }
         if (msg.type === "result") result = msg;
       }
     } catch (e) {
@@ -374,7 +401,16 @@ export class Runner {
     // Nothing to say (it wasn't for the bot, or a tool already said it): NO_REPLY, and nothing goes.
     const silent = status === "done" && SILENT.test(answer);
     // An edit takes over: the run it stopped says nothing.
-    if (why !== "edited" && !silent) await this.reply(m, answer || (why === "restart" ? RESTART : endText(status === "done" ? "failed" : status))).catch((e) => this.log({ ev: "brain.reply_failed", run: m.run_id, why: (e as Error).message }));
+    const ended = endText(status === "done" ? "failed" : status, {
+      client: tier === "client",
+      subtype: result?.subtype,
+      turns: result?.num_turns,
+      maxTurns: s.max_turns,
+      minutes: s.run_minutes,
+      costUsd: s.run_cost_usd,
+      error: error ?? (result && result.subtype !== "success" ? result.errors?.join("; ") : null),
+    });
+    if (why !== "edited" && !silent) await this.reply(m, answer || (why === "restart" ? RESTART : ended)).catch((e) => this.log({ ev: "brain.reply_failed", run: m.run_id, why: (e as Error).message }));
 
     // A resumed session's cost goes on from where it was: this run's is the difference.
     const total = result?.total_cost_usd ?? 0;

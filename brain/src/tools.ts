@@ -46,10 +46,11 @@ const SERVER = {
   },
   search: {
     about:
-      "What people said, by meaning and words, in any language (a question in English finds Egyptian Arabic and Franco-Arabic too), in the WhatsApp groups, the bot's private chats, email, Slack, files and recorded meetings this person may read. For exact lookups use find.",
+      "What people said, in the WhatsApp groups, the bot's private chats, email, Slack, files, recorded meetings and your day notes (what happened in each chat each day) this person may read. It matches words, so always give other ways to say it in also: synonyms, Egyptian Arabic, Franco-Arabic, English. Search before saying you can't see or don't know something. For exact lookups use find.",
     shape: {
       text: z.string().describe("What to look for, in a few words."),
-      in: z.array(z.enum(["groups", "private", "email", "slack", "files", "meetings"])).optional().describe("Where; everywhere when empty."),
+      also: z.array(z.string()).optional().describe("Other ways to say it, 3 to 10: synonyms, Arabic, Franco-Arabic, English, names as people write them. \"video done\": فيديو, مونتاج, تسليم, خلص, جاهز, edit, ready."),
+      in: z.array(z.enum(["groups", "private", "email", "slack", "files", "meetings", "notes"])).optional().describe("Where; everywhere when empty."),
       since: z.string().optional().describe("Only since this day or time (ISO 8601, Cairo's offset)."),
       limit: z.number().int().optional().describe("Up to 30 (12 when not given)."),
     },

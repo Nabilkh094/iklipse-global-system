@@ -12,7 +12,7 @@ import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { BotClient } from "../src/bot.js";
 import type { Config } from "../src/config.js";
 import type { Incoming, Start } from "../src/prompt.js";
-import { Runner, type Query } from "../src/run.js";
+import { actsOn, endText, Runner, type Query } from "../src/run.js";
 import { pick, QUIET_MS, Sessions } from "../src/sessions.js";
 
 const cfg: Config = {
@@ -209,8 +209,28 @@ test("limits: the turns or the cost ran out, said in English whatever they wrote
   const { bot, said, calls } = fakeBot(start("member"));
   const { q } = fakeQuery(() => result("", { subtype: "error_max_budget_usd" }));
   await runner(bot, q).run(msg({ text: "لخصلي كل الإيميلات" }));
-  assert.match(said()[0]!, /hit the limit/);
+  assert.match(said()[0]!, /^Not finished: it hit the \$[\d.]+ cost limit for one request/);
   assert.equal(calls.find((c) => c.name === "_finish")!.payload.status, "budget");
+});
+
+test("limits: too many steps, said with the limit", async () => {
+  const { bot, said, calls } = fakeBot(start("member"));
+  const { q } = fakeQuery(() => result("", { subtype: "error_max_turns" }));
+  await runner(bot, q).run(msg());
+  assert.match(said()[0]!, /^Not finished: it needed more than \d+ steps, the limit for one request\. Ask for a smaller part of it\.$/);
+  assert.equal(calls.find((c) => c.name === "_finish")!.payload.status, "budget");
+});
+
+test("why it ended: a client hears only the line, the team the cause", () => {
+  assert.equal(endText("failed", { client: true, error: "boom" }), "Something went wrong on my side before I could finish. Ask again in a minute.");
+  assert.equal(endText("failed", { error: "the bot didn't answer" }), "Failed before finishing: the bot didn't answer. Ask again in a minute.");
+  assert.equal(endText("timeout", { minutes: 10, turns: 7 }), "Not finished: it ran past 10 minutes, the limit for one request, after 7 steps. Ask for a smaller part of it.");
+});
+
+test("on it: not once a tool that sends or changes something ran", () => {
+  assert.equal(actsOn([{ type: "tool_use", name: "mcp__iklipse__meeting" }]), true);
+  assert.equal(actsOn([{ type: "tool_use", name: "mcp__iklipse__search" }]), false);
+  assert.equal(actsOn([{ type: "text", text: "hi" }]), false);
 });
 
 test("too long: stopped at run_minutes, said so", async (t) => {
@@ -222,7 +242,7 @@ test("too long: stopped at run_minutes, said so", async (t) => {
   t.mock.timers.tick(20_000);
   t.mock.timers.tick(40_000);
   await done;
-  assert.deepEqual(said(), ["On it.", "That took too long, so I stopped. Ask for a smaller part of it."]);
+  assert.deepEqual(said(), ["On it.", "Not finished: it ran past 1 minute, the limit for one request. Ask for a smaller part of it."]);
   assert.equal(calls.find((c) => c.name === "_finish")!.payload.status, "timeout");
 });
 

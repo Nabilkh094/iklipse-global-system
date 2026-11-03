@@ -13,7 +13,7 @@ import { cairoStamp, str, type ClaudeTool, type Db } from "./kit.ts";
 import { BATCH, embedder, type Embedder } from "./embed.ts";
 import type { Me } from "./look.ts";
 
-export type Source = "wa_message" | "wa_dm" | "mail_message" | "slack_message" | "wa_file" | "fireflies";
+export type Source = "wa_message" | "wa_dm" | "mail_message" | "slack_message" | "wa_file" | "fireflies" | "bot_day_note";
 
 /** A piece of what was said, as kept in bot_search_chunk. */
 export interface Piece {
@@ -31,7 +31,7 @@ export interface Piece {
 
 /** About this many characters a piece (a few hundred words), and at most this many pieces of one thing. */
 const PIECE = 1500;
-const MAX_PIECES: Record<Source, number> = { wa_message: 4, wa_dm: 4, slack_message: 4, mail_message: 4, wa_file: 8, fireflies: 40 };
+const MAX_PIECES: Record<Source, number> = { wa_message: 4, wa_dm: 4, slack_message: 4, mail_message: 4, wa_file: 8, fireflies: 40, bot_day_note: 4 };
 
 /** Text cut into pieces of about PIECE characters, at a line or sentence end when there's one. */
 export function cut(text: string, max: number): string[] {
@@ -106,6 +106,12 @@ export function piecesOf(source: Source, r: Row): Piece[] {
       text = [s(r.title), ...summary, ...said].join("\n");
       break;
     }
+    case "bot_day_note":
+      // What happened there that day (notes.ts dayNotes), as Claude wrote it at night.
+      Object.assign(base, { chat_id: s(r.chat_id), place: `the day's notes of ${s(r.place) || "a chat"} (${s(r.day)})`, who: "the bot's notes" });
+      at = `${s(r.day)}T22:00:00Z`;
+      text = s(r.text);
+      break;
   }
   return cut(text, MAX_PIECES[source]).map((t, part) => ({ ...base, source_id: id, at, part, text: t }));
 }
@@ -147,6 +153,11 @@ async function readRows(db: Db, source: Source, ids: string[]): Promise<Map<stri
     }
     case "wa_file": {
       const { data, error } = await db.from("wa_file").select("id, chat_id, name, text, created_at").in("id", ids);
+      if (error) throw new Error(error.message);
+      return byId((data ?? []) as Row[]);
+    }
+    case "bot_day_note": {
+      const { data, error } = await db.from("bot_day_note").select("id, chat_id, day, place, text").in("id", ids);
       if (error) throw new Error(error.message);
       return byId((data ?? []) as Row[]);
     }
@@ -233,16 +244,18 @@ const WHERE: Record<string, Source[]> = {
   slack: ["slack_message"],
   files: ["wa_file"],
   meetings: ["fireflies"],
+  notes: ["bot_day_note"],
 };
 
 export const SEARCH_TOOL: ClaudeTool = {
   name: "search",
   description:
-    "Searches what people said, by meaning and by words, in any language: a question in English finds Egyptian Arabic and Franco-Arabic messages too. In the WhatsApp groups, the bot's private chats, email, Slack, files and recorded meetings, only what this person may read. Use it for what was said about something (\"what did Acme say about the logo\", \"when did we talk about the price\"); use find for exact lookups (a table, an id, dates, counts). Gives the pieces that match: where, who, when, the words.",
+    "Searches what people said, in the WhatsApp groups, the bot's private chats, email, Slack, files, recorded meetings and the bot's day notes (what happened in each chat each day), only what this person may read. It matches words (each as a word's start, Arabic with or without ال/و/ب), so give other ways to say it in also: synonyms, Egyptian Arabic, Franco-Arabic and English (\"video done\": فيديو, مونتاج, تسليم, خلص, جاهز, edit, ready, delivered). Use it for what was said about something (\"what did Acme say about the logo\", \"when did we talk about the price\"), and before saying you can't see or don't know something; use find for exact lookups (a table, an id, dates, counts). Gives the pieces that match: where, who, when, the words.",
   input_schema: {
     type: "object",
     properties: {
       text: { type: "string", description: "What to look for, in a few words (any language)." },
+      also: { type: "array", items: { type: "string" }, description: "Other ways to say it, 3 to 10 words or short phrases: synonyms, Arabic, Franco-Arabic, English, names as people write them." },
       in: { type: "array", items: { type: "string", enum: Object.keys(WHERE) }, description: "Where to look; everywhere when empty." },
       since: { type: "string", description: "Only what was said since this day or time (ISO 8601 with Cairo's offset). Else empty." },
       limit: { type: "integer", description: "How many pieces, up to 30 (default 12)." },
@@ -253,6 +266,7 @@ export const SEARCH_TOOL: ClaudeTool = {
 
 export interface Search {
   text?: string;
+  also?: string[];
   in?: string[];
   since?: string;
   limit?: number;
@@ -270,6 +284,7 @@ export function mayRead(me: Me, p: Pick<Piece, "source" | "chat_id" | "account_i
     case "wa_dm":
       return me.admin || me.dms.includes(str(p.chat_id));
     case "wa_file":
+    case "bot_day_note":
       return me.admin || str(p.chat_id).endsWith("@g.us") || me.dms.includes(str(p.chat_id));
     case "mail_message":
       return me.mail.includes(str(p.account_id));
@@ -281,6 +296,45 @@ export function mayRead(me: Me, p: Pick<Piece, "source" | "chat_id" | "account_i
 }
 
 export class SearchRefused extends Error {}
+
+/** As the database matches words (0113 _search_norm): one form of each Arabic letter, no tashkeel, lower case. */
+const norm = (t: string) =>
+  t
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[ً-ٰٟـ]/g, "")
+    .toLowerCase();
+
+/** Words too common to look for. */
+const COMMON = new Set(
+  ["the", "and", "for", "with", "what", "did", "was", "were", "are", "you", "that", "this", "from", "about", "have", "has", "who", "when", "how", "any", "يا", "في", "من", "على", "عن", "مع", "ده", "دي", "دا", "اللي", "الي", "انا", "انت", "هو", "هي", "احنا", "ايه", "هل", "كان", "مش", "بس", "كده", "كدا", "لما", "عشان"].map(norm),
+);
+
+/** Arabic's attached starts: a word is looked for with them and without ("فيديو" finds "والفيديو"). */
+const STARTS = ["ال", "وال", "بال", "فال", "كال", "لل", "و", "ب", "ف", "ل"];
+
+/**
+ * The words to look for (each as a word's start, bot_search p_terms): the
+ * asker's and the other ways they gave, Arabic ones also with and without
+ * their attached starts. At most 80.
+ */
+export function termsOf(texts: string[]): string[] {
+  const out = new Set<string>();
+  for (const w of norm(texts.join(" ")).split(/[^\p{L}\p{N}]+/u)) {
+    if (w.length < 2 || COMMON.has(w)) continue;
+    if (!/[؀-ۿ]/.test(w)) {
+      if (w.length >= 3 || /\d/.test(w)) out.add(w);
+      continue;
+    }
+    const base = w.replace(/^(وال|بال|فال|كال|لل|ال)/, "");
+    const stem = base.length >= 3 ? base : w;
+    out.add(w);
+    out.add(stem);
+    for (const s of STARTS) out.add(s + stem);
+  }
+  return [...out].slice(0, 80);
+}
 
 /** The pieces that match, as Claude reads them (like find's answer). */
 export async function search(db: Db, me: Me, q: Search, e: Embedder | null = embedder()): Promise<string> {
@@ -310,6 +364,7 @@ export async function search(db: Db, me: Me, q: Search, e: Embedder | null = emb
     p_scope: { admin: me.admin, dms: me.dms, mail: me.mail, ff_accounts: me.ffAccounts, ff_meetings: me.ffMeetings },
     p_since: since,
     p_limit: Math.max(1, Math.min(Number(q.limit) || 12, 30)),
+    p_terms: termsOf([text, ...(Array.isArray(q.also) ? q.also.map(str).slice(0, 12) : [])]),
   });
   if (error) throw new SearchRefused(/bot_search/.test(error.message) ? "Search isn't set up yet (0113)." : "That search failed.");
   const rows = ((data ?? []) as Found[]).filter((p) => mayRead(me, p));
