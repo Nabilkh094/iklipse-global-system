@@ -601,3 +601,40 @@ export async function ownerSays(
   if (row.chat_id && row.chat_id !== o.chatId && !ownerChats(s).includes(row.chat_id)) await send(row.chat_id, `${owner ? "The super admin said no" : "Cancelled"}: ${row.what}`, row.message_id).catch(() => null);
   return true;
 }
+
+// ------------------------------------------------------------ left behind --
+
+/** A run still queued or running this long never finishes (the brain went down or restarted mid-run). */
+export const STALE_MS = 30 * MIN;
+
+/**
+ * Runs left behind: closed as failed, with why, and the one who asked told
+ * plainly (a client isn't: the team's answer comes). Only ones from the last
+ * day are said: an old one is only closed. How many were closed.
+ */
+export async function closeStale(db: Db, send: Send, now = Date.now()): Promise<number> {
+  const { data } = await db
+    .from("brain_run")
+    .select("id, status, chat_id, reply_chat, message_id, request, tier, created_at")
+    .in("status", ["queued", "running"])
+    .lt("created_at", iso(now - STALE_MS))
+    .order("created_at")
+    .limit(20);
+  let closed = 0;
+  for (const r of (data ?? []) as { id: string; status: string; chat_id: string; reply_chat: string; message_id: string; request: string | null; tier: string; created_at: string }[]) {
+    const why = r.status === "queued" ? "the brain never started it (it was down or restarting)" : "the brain stopped while working on it (a restart or a crash)";
+    const { data: took } = await db
+      .from("brain_run")
+      .update({ status: "failed", error: `Never finished: ${why}.`, finished_at: iso(now) })
+      .eq("id", r.id)
+      .in("status", ["queued", "running"])
+      .select("id");
+    if (!took?.length) continue;
+    closed++;
+    if (r.tier === "client" || now - Date.parse(r.created_at) > 24 * 60 * MIN) continue;
+    const asked = str(r.request).replace(/\s+/g, " ").trim();
+    const short = asked.length > 80 ? `${asked.slice(0, 80)}...` : asked;
+    await send(r.reply_chat, `Not finished: "${short}". ${why[0]!.toUpperCase()}${why.slice(1)}. Send it again.`, r.reply_chat === r.chat_id ? r.message_id : null).catch(() => null);
+  }
+  return closed;
+}

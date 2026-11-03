@@ -26,6 +26,7 @@ import { answer as answerTurn, clientMeeting, freeTimesOf, orderedMeeting } from
 import { everyone, freshNames, giveOrder, nowText, openTo, ORDER_COLS, orderFollow, orderOutcome, situation, toEach, type Follow, type Order, type Outcome } from "./orders.ts";
 import { askTeam, draftIssues, DRAFT_COLS, HOLD, settleDraft, whoIs, type Draft } from "./dm.ts";
 import { historyOf } from "./history.ts";
+import { lidPhones, mentionNamer, timelineOf } from "./timeline.ts";
 import { reasonsText } from "./guard.ts";
 import { cancelReminders, listText, openReminders, setReminder } from "./reminders.ts";
 import { alertAct, type AlertAct, type OpenAlert } from "./pause.ts";
@@ -1363,6 +1364,7 @@ async function contextFor(c: Ctx): Promise<string> {
       "The group in the last hour",
       ((data ?? []) as { sender_name: string | null; from_bot: boolean; text: string | null; sent_at: string }[]).reverse().map((m) => `[${stampOf(m.sent_at)}] ${m.from_bot ? "BOT" : (m.sender_name ?? "someone")}: ${one(m.text, 400)}`),
     );
+    section(ELSEWHERE, await elsewhereOf(c, null));
     return out.join("\n").trim();
   }
 
@@ -1379,7 +1381,26 @@ async function contextFor(c: Ctx): Promise<string> {
   section("Your questions to them about clients' private chats, waiting (client_chat)", ((waiting.data ?? []) as Draft[]).map(draftLine));
   if (asked && Date.now() - Date.parse(asked.sentAt) < 3 * 24 * 60 * MIN) section(`Clients you asked them about (client_details, list ${asked.id})`, asked.lines);
   section("Your private chat with them (BOT is you; messages other parts of iklipse sent are here too)", await chatLines(db, run.chat_id, 12));
+  section(ELSEWHERE, await elsewhereOf(c, run.chat_id));
   return out.join("\n").trim();
+}
+
+const ELSEWHERE =
+  "What happened with them in every chat, the last 48 hours (their messages, mentions of them, your replies, their private chat with you; what they asked elsewhere and what you asked them is here). In a group, don't repeat what's from their private chat unless they ask";
+
+/** A team member's last 48 hours across the chats (timeline.ts). skip: the chat shown on its own. */
+async function elsewhereOf(c: Ctx, skip: string | null): Promise<string[]> {
+  const db = c.d.db;
+  const [{ data: nums }, { data: ids }, lp] = await Promise.all([
+    db.from("wa_member").select("phone").eq("user_id", c.asker.id),
+    db.from("wa_member_lid").select("lid").eq("user_id", c.asker.id),
+    lidPhones(db),
+  ]);
+  const phones = ((nums ?? []) as { phone: string | null }[]).map((w) => str(w.phone));
+  const lids = ((ids ?? []) as { lid: string }[]).map((l) => l.lid);
+  // Their ids WhatsApp gave in a group with one of their numbers, linked or not yet.
+  for (const [lid, phone] of lp) if (phones.includes(phone)) lids.push(lid);
+  return await timelineOf(db, { phones, lids }, mentionNamer(c.d.t, lp, c.d.s.bot_phone), { skip, limit: 40 });
 }
 
 /** Today's spend, Cairo day. */

@@ -102,7 +102,9 @@ import { bookedOrders, followOrder, fromTarget, nagOrders, notTheTeam, onTheTeam
 import { fileOf, keepFile, keepFiles, noteFile, spoken, voiceToBot, wordsOf, writeOut } from "./files.ts";
 import { VOICE } from "./voice.ts";
 import { toGreen, wahaCall, wahaCode, wahaEnsure, wahaInfo, wahaLogout, wahaMissed, wahaProfile, wahaRestart, wahaSettings, wahaStatus, wahaStop } from "./waha.ts";
-import { brainEnv, brainOn, brainSettings, clientAsker, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
+import { lidPhones, linkTeamLids, mentionNamer } from "./timeline.ts";
+import { writeDayNotes } from "./daynotes.ts";
+import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
 import { brainApi, carryOut, type Deps, type SendFile } from "./brain-tools.ts";
 
 const ELEVEN_KEY = env("ELEVEN_API_KEY") || env("ELEVENLABS_API_KEY");
@@ -360,6 +362,8 @@ async function syncGroup(db: Db, cfg: Config, chatId: string) {
     shapes.set(key, [...(shapes.get(key) ?? []), row]);
   }
   for (const batch of shapes.values()) await db.from("wa_participant").upsert(batch, { onConflict: "chat_id,wa_id" });
+  // The team's hidden-number ids, learned from their numbers here: a mention of them is them.
+  await linkTeamLids(db, unique);
   await db
     .from("wa_group")
     // A good read clears an old error (team groups are never analyzed, so nothing else would).
@@ -1256,7 +1260,10 @@ async function brainNow(db: Db, o: Parameters<typeof orderNow>[1]): Promise<bool
   if (!replyChat) return false;
   let quoted = o.quoted;
   if (!quoted && o.quotedId && o.where === "private") quoted = str((await db.from("wa_dm").select("text").eq("id", o.quotedId).maybeSingle()).data?.text) || null;
-  const r = await forward(db, e, { id: o.id, chatId: o.chatId, where: o.where, via: o.via, text: o.text, quoted, quotedId: o.quotedId ?? null, asker, replyChat, chatName: o.chatName ?? null });
+  // Mentions as names ("@Sara"), not WhatsApp's hidden-number ids: the brain knows who's meant.
+  const [s, t, lp] = await Promise.all([settings(db), team(db), lidPhones(db)]);
+  const name = mentionNamer(t, lp, s.bot_phone);
+  const r = await forward(db, e, { id: o.id, chatId: o.chatId, where: o.where, via: o.via, text: name(o.text), quoted: quoted ? name(quoted) : null, quotedId: o.quotedId ?? null, asker, replyChat, chatName: o.chatName ?? null });
   if (r === "fallback") {
     // Down: the old order router only when an admin wants it (fallback_old); else they hear it, once in a while.
     if (bs.fallback_old) return false;
@@ -1821,7 +1828,7 @@ async function tick(db: Db) {
   const t0 = Date.now();
   const s = await settings(db);
   if (!s.enabled && !s.mail_enabled && !s.slack_enabled) return { off: true };
-  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
+  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, noted: 0, stale: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
   const cfg = await config(db);
   const t = await team(db);
 
@@ -1880,6 +1887,12 @@ async function tick(db: Db) {
     { name: "search", ms: RUN_MS - 30_000, run: async (deadline) => void (out.searched = (await indexSome(db, deadline))?.indexed ?? 0) },
     // What the bot remembers about clients whose chats went quiet (memory.ts, 0112).
     ...(s.enabled ? [{ name: "memory", ms: 40_000, run: async (deadline: number) => void (out.remembered = await rememberClients(db, s, deadline)) }] : []),
+    // Brain runs left behind by a restart or a crash: closed, and the one who asked told why (brain.ts).
+    ...(new Date(t0).getUTCMinutes() % 5 === 2 ? [{ name: "brain-stale", ms: 30_000, run: async () => void (out.stale = await closeStale(db, sendAs(cfg))) }] : []),
+    // Each busy chat's notes for the day before, written after midnight, every 10 minutes (daynotes.ts, 0134).
+    ...(s.enabled && new Date(t0).getUTCMinutes() % 10 === 5
+      ? [{ name: "day-notes", ms: 60_000, run: async (deadline: number) => void (out.noted = await writeDayNotes(db, s, t, deadline)) }]
+      : []),
   ];
   out.busy = (await runParts(db, parts, { t0, runMs: RUN_MS, errors: out.errors })).busy;
   return out;
