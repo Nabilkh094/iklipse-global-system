@@ -267,7 +267,8 @@ function main() {
         "import sys",
         "from faster_whisper import WhisperModel",
         `m = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8", cpu_threads=2, download_root=${JSON.stringify(conf.whisperModels)}, local_files_only=True)`,
-        "segs, info = m.transcribe(sys.argv[1], vad_filter=True)",
+        // Egyptian Arabic with English words in it: the hint keeps "skills" from coming out as Arabic letters.
+        `segs, info = m.transcribe(sys.argv[1], vad_filter=True, beam_size=5, initial_prompt=${JSON.stringify("عامية مصرية: Claude, skills, GitHub, Google Drive, code, VPS, chat.")})`,
         "print(' '.join(s.text.strip() for s in segs))",
       ].join("\n");
       const child = spawn("nice", [conf.whisper, "-c", py, file], { env: { HF_HUB_OFFLINE: "1", PATH: "/usr/bin:/bin" } });
@@ -288,7 +289,7 @@ function main() {
       const type = String(full?.media?.mimetype ?? "");
       if (file && /^audio\//.test(type)) {
         const said = await transcribe(file);
-        text = said ? `[voice note] ${said}${text ? `\n${text}` : ""}` : `${text}\n[a voice note that couldn't be written out, saved at ${file}]`;
+        text = said ? `[voice note, written out by machine: a word may be wrong, read it for what they mean] ${said}${text ? `\n${text}` : ""}` :`${text}\n[a voice note that couldn't be written out, saved at ${file}]`;
       } else if (file) {
         text += `\n[they sent ${/^image\//.test(type) ? "a photo" : "a file"}, saved at ${file}${type ? ` (${type})` : ""}]`;
       } else text += "\n[they sent a file that couldn't be saved]";
