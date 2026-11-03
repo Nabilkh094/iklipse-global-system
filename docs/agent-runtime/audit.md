@@ -10,7 +10,7 @@ Line references point at `main` as of `be575d9`, before this branch. Every findi
 ## 1. How a message moves through the system
 
 ```
-WhatsApp ──► Green API or WAHA (waha.ts makes WAHA look like Green API)
+WhatsApp ──► WAHA (waha.ts turns its webhooks into the bot's own shape)
                │  POST /whatsapp-bot/hook | /waha   (Bearer WATCH_HOOK_TOKEN, index.ts:436-440)
                ▼
            onHook (index.ts:462-629)
@@ -41,7 +41,7 @@ pg_cron "watch-tick" every minute ─► POST /tick (X-Iklipse-Secret) ─► ti
 
 **Tools.** In look.ts the only tool is `find`. Elsewhere, "tools" are the classifier's output schema, and the code acts on the chosen enum value with a `switch`.
 
-**Results.** Everything goes out through `sendAs` (index.ts:1109-1136) to Green API or WAHA, and the message id that comes back is kept on the record that caused it: `bot_order.sent_ids` / `report_ids`, `bot_draft.ask_ids`, `wa_bot_turn`.
+**Results.** Everything goes out through `sendAs` (index.ts:1109-1136) to WAHA, and the message id that comes back is kept on the record that caused it: `bot_order.sent_ids` / `report_ids`, `bot_draft.ask_ids`, `wa_bot_turn`.
 
 ## 2. Inventory of what the bot can do
 
@@ -94,7 +94,7 @@ A request outside the list ends as `none`, `ignore`, or the nearest wrong action
 - So "see who's late and remind them" can't be done.
 - The only hand-off is to re-enter as new text: `decideDraft`, then `order(text)`, then `orderNow` (dm.ts:431-433, index.ts:1155-1165); and `followOrder`, then `order` (orders.ts:845-847).
 
-**5. Verification.** A send counts as done once the provider returns an id (`toThem` orders.ts:72-78, `sendAs`). Delivery to the phone is seen later through the Green API echo (`stillQueued` kit.ts:211-222), but that is only used to pace reminders. The reports ("Sent to X") come from code, not from Claude. That is good. But the meaning ("WhatsApp took it") is never stated.
+**5. Verification.** A send counts as done once the provider returns an id (`toThem` orders.ts:72-78, `sendAs`). WAHA keeps a sent message as the bot's at once (`sendAs`); delivery to the phone isn't waited for. The reports ("Sent to X") come from code, not from Claude. That is good. But the meaning ("WhatsApp took it") is never stated.
 
 **6. Error recovery and retries.**
 

@@ -23,8 +23,8 @@ import {
 
 // -----------------------------------------------------------------------------
 // Connected accounts > WhatsApp, under the QR code (admins only, 0098): all an
-// admin controls of the bot's WhatsApp bridge. How fast the bot answers (for
-// Green API too), what the number does before it writes (marks the chat read,
+// admin controls of the bot's WhatsApp bridge. How fast the bot answers, what
+// the number does before it writes (marks the chat read,
 // shows "typing…"), whether it shows online, the number's profile, WhatsApp's
 // limits on it, and the bridge itself (restart, stop, where its messages go).
 // -----------------------------------------------------------------------------
@@ -72,7 +72,7 @@ function readFile(f: File): Promise<{ mimetype: string; data: string }> {
   });
 }
 
-export function WhatsAppBridgeControls({ linked, botUses }: { linked: boolean; botUses: boolean }) {
+export function WhatsAppBridgeControls({ linked }: { linked: boolean }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -173,7 +173,7 @@ export function WhatsAppBridgeControls({ linked, botUses }: { linked: boolean; b
       {/* ---------------------------------------------------- speed */}
       <SettingGroup
         title="How fast the bot answers"
-        info="The bot waits for someone to stop writing before it reads what they said, so it answers everything at once. A minute or more is read on the bot's minute-by-minute run; less than a minute is read right after the wait. These hold for Green API too."
+        info="The bot waits for someone to stop writing before it reads what they said, so it answers everything at once. A minute or more is read on the bot's minute-by-minute run; less than a minute is read right after the wait."
         hint={!info?.settings?.dm_enabled ? "Answering private chats is off (Alerts > Settings): the private chat times wait for it." : undefined}
       >
         <NumberRow
@@ -222,7 +222,7 @@ export function WhatsAppBridgeControls({ linked, botUses }: { linked: boolean; b
       {/* ---------------------------------------------------- like a person */}
       <SettingGroup
         title="Before it writes"
-        info="What the number does before each message, so it looks like a person and WhatsApp is less likely to flag it. Only on the bridge, not Green API."
+        info="What the number does before each message, so it looks like a person and WhatsApp is less likely to flag it."
       >
         <SwitchRow
           id="wa-seen"
@@ -479,10 +479,9 @@ export function WhatsAppBridgeControls({ linked, botUses }: { linked: boolean; b
               iconLeft={<Power size={14} />}
               className="max-sm:h-10"
               loading={stop.isPending}
-              disabled={botUses || !info?.status || info.status === "STOPPED"}
-              title={botUses ? "The bot uses this number: go back to Green API first" : undefined}
+              disabled={!info?.status || info.status === "STOPPED"}
               onClick={async () => {
-                if (await confirm({ title: "Stop the bridge?", message: "Nothing comes in or goes out on this number until it's started again. It stays linked.", confirmLabel: "Stop", danger: true }))
+                if (await confirm({ title: "Stop the bridge?", message: "The bot is off WhatsApp: nothing comes in or goes out until it's started again. The number stays linked.", confirmLabel: "Stop", danger: true }))
                   stop.mutate();
               }}
             >

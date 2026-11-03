@@ -330,7 +330,7 @@ const teamOf = (c: Ctx) => new Map([...c.dir.team].map(([id, a]): [string, Atten
 const teamNamed = (c: Ctx, ids: string[]) => ids.map((id) => c.dir.team.get(id.replace(/^t:/, ""))).filter((a): a is Attendee => !!a);
 
 /** The watch_settings columns the brain may change, with the owner's OK: never a token, a key or the WhatsApp line itself. */
-const SETTING_DENY = /^(id|bot_phone|bot_state|hook_at|wa_provider|taught)$|token|secret|key|password|instance/i;
+const SETTING_DENY = /^(id|bot_phone|bot_state|hook_at|taught)$|token|secret|key|password|instance/i;
 /** Every Claude the brain may run on (0124 brain_settings_set lists the same). */
 const BRAIN_MODELS = new Set([
   "claude-haiku-5-5",

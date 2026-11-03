@@ -260,7 +260,6 @@ export const WEB_HOSTS = [
   "deno.land",
   "www.npmjs.com",
   "waha.devlike.pro",
-  "green-api.com",
   "developer.calendly.com",
   "developers.google.com",
   "react.dev",

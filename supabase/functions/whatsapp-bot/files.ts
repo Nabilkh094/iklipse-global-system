@@ -34,7 +34,7 @@ export interface SentFile {
   name: string | null;
 }
 
-/** A message with a file, from Green API's webhook (or the bridge's, made to look like it): what it is and where WhatsApp has it. */
+/** A message with a file, from the bridge's webhook (in the bot's shape, waha.ts toHook): what it is and where WhatsApp has it. */
 export function fileOf(md: Record<string, any> | undefined): SentFile | null {
   const t = str(md?.typeMessage);
   const f = md?.fileMessageData ?? {};

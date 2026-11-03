@@ -1,7 +1,7 @@
 // What the hook keeps (keep.ts): of a team group not watched, only what the
 // gate reads (the bot's messages, who wrote one that reached it), so a reply to
 // the bot and an answer to what it asked still reach it, and nothing of theirs
-// is searched or found; and an edit, on Green API or WAHA, kept on the message
+// is searched or found; and an edit (WAHA's, in the bot's shape) kept on the message
 // it changes and gone on as that one, so nothing done with it is done twice.
 // Names and numbers are made up.
 
@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { fakeDb } from "./test/fake-db.ts";
 import { actedOn, EDIT_NOTE, editedId, editOf, kept, keeping, type Kept } from "./keep.ts";
 import { asks, viaOf } from "./gate.ts";
-import { toGreen } from "./waha.ts";
+import { toHook } from "./waha.ts";
 import { CANT_HELP, takeOrder } from "./orders.ts";
 import { indexSome } from "./search.ts";
 import { find, type Me } from "./look.ts";
@@ -162,11 +162,11 @@ test("watching off, the team group not watched: their talk with each other isn't
 
 // ----------------------------------------------------------------- edits (3.4) --
 
-/** Green API's edit: the new words, and the id of the message it changes (stanzaId). */
-const greenEdit = (stanzaId: string, textMessage: string) => ({ typeMessage: "editedMessage", editedMessageData: { textMessage, stanzaId, caption: "" } });
+/** An edit in the bot's shape: the new words, and the id of the message it changes (stanzaId). */
+const editMsg = (stanzaId: string, textMessage: string) => ({ typeMessage: "editedMessage", editedMessageData: { textMessage, stanzaId, caption: "" } });
 
-test("an edit on Green API: linked to the message it changes; anything else isn't an edit", () => {
-  assert.equal(editedId(greenEdit("omar-1", "@iklipse remind Sara at 6")), "omar-1");
+test("an edit: linked to the message it changes; anything else isn't an edit", () => {
+  assert.equal(editedId(editMsg("omar-1", "@iklipse remind Sara at 6")), "omar-1");
   assert.equal(editedId({ typeMessage: "extendedTextMessage", extendedTextMessageData: { text: "hi", stanzaId: "omar-1" } }), null);
   assert.equal(editedId({ typeMessage: "editedMessage", editedMessageData: { textMessage: "hi" } }), null);
   assert.equal(editedId(undefined), null);
@@ -175,15 +175,15 @@ test("an edit on Green API: linked to the message it changes; anything else isn'
 /** A WAHA webhook, as it comes. */
 const wahaEv = (event: string, payload: Record<string, unknown>) => ({ event, me: { id: `${BOT}@c.us` }, payload: { from: TEAM, participant: SARA.sender, fromMe: false, timestamp: NOW / 1000, ...payload } });
 
-test("an edit on WAHA: message.edited is Green API's editedMessage, linked to the message it changes", async () => {
+test("an edit on WAHA: message.edited is an editedMessage, linked to the message it changes", async () => {
   const f = fakeDb({ waha_msg: [] });
-  const b = await toGreen(f.db, wahaEv("message.edited", { id: `false_${TEAM}_EDIT1_${SARA.sender}`, body: "@iklipse remind Omar at 6", editedMessageId: `false_${TEAM}_ORIG1_${SARA.sender}` }));
+  const b = await toHook(f.db, wahaEv("message.edited", { id: `false_${TEAM}_EDIT1_${SARA.sender}`, body: "@iklipse remind Omar at 6", editedMessageId: `false_${TEAM}_ORIG1_${SARA.sender}` }));
   assert.equal(b?.typeWebhook, "incomingMessageReceived");
   assert.equal(b?.idMessage, "EDIT1");
   assert.deepEqual(b?.messageData, { typeMessage: "editedMessage", editedMessageData: { textMessage: "@iklipse remind Omar at 6", stanzaId: "ORIG1" } });
   assert.equal(editedId(b?.messageData), "ORIG1");
   // No editedMessageId: the one in what WhatsApp sent.
-  const raw = await toGreen(
+  const raw = await toHook(
     f.db,
     wahaEv("message.edited", { id: `false_${TEAM}_EDIT2_${SARA.sender}`, body: "at 7 then", _data: { Message: { protocolMessage: { type: "MESSAGE_EDIT", key: { ID: "ORIG2" }, editedMessage: { conversation: "at 7 then" } } } } }),
   );
@@ -197,10 +197,10 @@ test("an edit on WAHA never comes as a new message: message.any carrying one is 
     { Message: { editedMessage: { message: { protocolMessage: { key: { ID: "ORIG1" } } } } } },
     { Message: { protocolMessage: { type: "MESSAGE_EDIT", key: { ID: "ORIG1" }, editedMessage: { conversation: "remind Omar at 6" } } } },
   ]) {
-    assert.equal(await toGreen(f.db, wahaEv("message.any", { id: `false_${TEAM}_EDIT1_${SARA.sender}`, body: "remind Omar at 6", _data })), null, JSON.stringify(_data));
+    assert.equal(await toHook(f.db, wahaEv("message.any", { id: `false_${TEAM}_EDIT1_${SARA.sender}`, body: "remind Omar at 6", _data })), null, JSON.stringify(_data));
   }
   // A plain message still is one.
-  const plain = await toGreen(f.db, wahaEv("message.any", { id: `false_${TEAM}_NEW1_${SARA.sender}`, body: "hello", _data: { Message: { conversation: "hello" } } }));
+  const plain = await toHook(f.db, wahaEv("message.any", { id: `false_${TEAM}_NEW1_${SARA.sender}`, body: "hello", _data: { Message: { conversation: "hello" } } }));
   assert.equal(plain?.messageData?.typeMessage, "extendedTextMessage");
 });
 
@@ -228,7 +228,7 @@ const crew =
 
 test("an edit of a message the bot already acted on: its words kept on that one, no second order; told once, as a reply to it", async () => {
   const f = handled();
-  const md = greenEdit("omar-1", "@iklipse remind Sara at 6");
+  const md = editMsg("omar-1", "@iklipse remind Sara at 6");
   const e = await editOf(f.db, { md, chatId: TEAM, text: "@iklipse remind Sara at 6 (edited)", mine: false, team: crew() });
   assert.deepEqual(e, { id: "omar-1", text: "@iklipse remind Sara at 6 (edited)", quotedId: null, done: true, note: EDIT_NOTE, answers: null });
   // Kept on the message it changes, not as a new one.
@@ -240,7 +240,7 @@ test("an edit of a message the bot already acted on: its words kept on that one,
   // It asks, so their answer, unquoted, reaches it (gate.ts).
   assert.equal(asks(EDIT_NOTE), true);
   // Edited again: told only the first time.
-  const again = await editOf(f.db, { md: greenEdit("omar-1", "@iklipse remind Sara at 7"), chatId: TEAM, text: "@iklipse remind Sara at 7 (edited)", mine: false, team: crew() });
+  const again = await editOf(f.db, { md: editMsg("omar-1", "@iklipse remind Sara at 7"), chatId: TEAM, text: "@iklipse remind Sara at 7 (edited)", mine: false, team: crew() });
   assert.equal(again?.done, true);
   assert.equal(again?.note, null);
   assert.equal(fetched, 0);
@@ -248,7 +248,7 @@ test("an edit of a message the bot already acted on: its words kept on that one,
 
 test("an edit that went on anyway would find the order taken: no second order, no model call, nothing sent", async () => {
   const f = handled();
-  const e = await editOf(f.db, { md: greenEdit("omar-1", "@iklipse remind Sara at 6"), chatId: TEAM, text: "@iklipse remind Sara at 6 (edited)", mine: false });
+  const e = await editOf(f.db, { md: editMsg("omar-1", "@iklipse remind Sara at 6"), chatId: TEAM, text: "@iklipse remind Sara at 6 (edited)", mine: false });
   const sent: string[] = [];
   const omar: Person = { id: "u-omar", name: "Omar", username: "omar", active: true, admin: false };
   const team: Team = { people: new Map([[omar.id, omar]]), byPhone: new Map([[OMAR.phone, omar]]), byLid: new Map(), others: new Set() };
@@ -265,18 +265,18 @@ test("the same edit sent again (a webhook retried): nothing more, and no note ab
     wa_message: [{ id: "omar-3", chat_id: TEAM, sender_id: OMAR.sender, phone: OMAR.phone, from_bot: false, text: "remind Sara at 5", quoted_id: null, sent_at: ago(60_000) }],
     bot_heard: [],
   });
-  const edit = { md: greenEdit("omar-3", "@iklipse remind Sara at 5"), chatId: TEAM, text: "@iklipse remind Sara at 5 (edited)", mine: false, own: "edit-1", team: crew() };
+  const edit = { md: editMsg("omar-3", "@iklipse remind Sara at 5"), chatId: TEAM, text: "@iklipse remind Sara at 5 (edited)", mine: false, own: "edit-1", team: crew() };
   assert.equal((await editOf(f.db, edit))?.done, false);
   f.tables.bot_heard!.push({ id: "order:omar-3" });
   f.tables.wa_message!.push({ id: "bot-3", chat_id: TEAM, from_bot: true, text: "Done, I'll remind Sara at 5:00 PM.", quoted_id: "omar-3", sent_at: ago(30_000) });
   // The same edit again: it isn't told it was acted on "before you edited it".
   assert.deepEqual(await editOf(f.db, edit), { id: "omar-3", text: "@iklipse remind Sara at 5 (edited)", quotedId: null, done: true, note: null, answers: null });
   // Edited again after that (another edit): told once, as before.
-  assert.equal((await editOf(f.db, { ...edit, md: greenEdit("omar-3", "@iklipse remind Sara at 6"), text: "@iklipse remind Sara at 6 (edited)", own: "edit-2" }))?.note, EDIT_NOTE);
+  assert.equal((await editOf(f.db, { ...edit, md: editMsg("omar-3", "@iklipse remind Sara at 6"), text: "@iklipse remind Sara at 6 (edited)", own: "edit-2" }))?.note, EDIT_NOTE);
   // An edit whose own id is the one it changes can't be told from the next: none is taken for a repeat.
   const g = handled({ wa_message: [{ id: "omar-4", chat_id: TEAM, from_bot: false, text: "hi", quoted_id: null }], bot_heard: [] });
   for (const words of ["hi all", "hi all!"]) {
-    assert.equal((await editOf(g.db, { md: greenEdit("omar-4", words), chatId: TEAM, text: `${words} (edited)`, mine: false, own: "omar-4" }))?.done, false, words);
+    assert.equal((await editOf(g.db, { md: editMsg("omar-4", words), chatId: TEAM, text: `${words} (edited)`, mine: false, own: "omar-4" }))?.done, false, words);
   }
   assert.equal(fetched, 0);
 });
@@ -284,7 +284,7 @@ test("the same edit sent again (a webhook retried): nothing more, and no note ab
 test("no note where the bot didn't answer it, in a client group, or for an edit from the bot's own phone", async () => {
   // Acted on, but nothing said back (the router let it be): no note.
   const quiet = handled({ wa_message: [{ id: "omar-1", chat_id: TEAM, from_bot: false, text: "@iklipse thanks", quoted_id: null, sent_at: ago(60_000) }] });
-  assert.equal((await editOf(quiet.db, { md: greenEdit("omar-1", "@iklipse thanks!"), chatId: TEAM, text: "@iklipse thanks! (edited)", mine: false, team: crew() }))?.note, null);
+  assert.equal((await editOf(quiet.db, { md: editMsg("omar-1", "@iklipse thanks!"), chatId: TEAM, text: "@iklipse thanks! (edited)", mine: false, team: crew() }))?.note, null);
   // A client group: never said there.
   const client = handled({
     wa_message: [
@@ -293,11 +293,11 @@ test("no note where the bot didn't answer it, in a client group, or for an edit 
     ],
     bot_heard: [{ id: "order:c-1" }],
   });
-  const c = await editOf(client.db, { md: greenEdit("c-1", "@iklipse book a call tomorrow"), chatId: CLIENT, text: "@iklipse book a call tomorrow (edited)", mine: false, team: crew() });
+  const c = await editOf(client.db, { md: editMsg("c-1", "@iklipse book a call tomorrow"), chatId: CLIENT, text: "@iklipse book a call tomorrow (edited)", mine: false, team: crew() });
   assert.equal(c?.done, true);
   assert.equal(c?.note, null);
   // From the bot's own phone.
-  assert.equal((await editOf(handled().db, { md: greenEdit("omar-1", "x"), chatId: TEAM, text: "x (edited)", mine: true, team: crew() }))?.note, null);
+  assert.equal((await editOf(handled().db, { md: editMsg("omar-1", "x"), chatId: TEAM, text: "x (edited)", mine: true, team: crew() }))?.note, null);
 });
 
 test("no note to someone the bot doesn't help: a guest, someone who left or someone it doesn't know heard \"I can't help you here\", and that's all", async () => {
@@ -309,7 +309,7 @@ test("no note to someone the bot doesn't help: a guest, someone who left or some
         { id: "bot-1", chat_id: TEAM, sender_id: null, phone: BOT, from_bot: true, text: CANT_HELP, quoted_id: "omar-1", sent_at: ago(4 * 60_000) },
       ],
     });
-  const edit = { md: greenEdit("omar-1", "@iklipse remind Sara at 6"), chatId: TEAM, text: "@iklipse remind Sara at 6 (edited)", mine: false };
+  const edit = { md: editMsg("omar-1", "@iklipse remind Sara at 6"), chatId: TEAM, text: "@iklipse remind Sara at 6 (edited)", mine: false };
   for (const [who, team] of [
     ["a guest", crew([[OMAR.phone, { ...omarOnTeam, guest: true }]])],
     ["someone who left", crew([[OMAR.phone, { ...omarOnTeam, active: false }]])],
@@ -340,12 +340,12 @@ test("an edit of a message the bot didn't act on: it goes on as that one, by its
     ],
     bot_heard: [],
   });
-  const e = await editOf(f.db, { md: greenEdit("omar-2", "which ones are mine?"), chatId: TEAM, text: "which ones are mine? (edited)", mine: false });
+  const e = await editOf(f.db, { md: editMsg("omar-2", "which ones are mine?"), chatId: TEAM, text: "which ones are mine? (edited)", mine: false });
   assert.deepEqual(e, { id: "omar-2", text: "which ones are mine? (edited)", quotedId: "bot-0", done: false, note: null, answers: null });
   // As the hook passes it on: a reply to the bot.
   assert.equal(await viaOf(f.db, ask({ text: e!.text, quotedId: e!.quotedId, who: OMAR })), "reply");
   // Not kept anywhere yet: it goes on as that one all the same, and is kept by the hook as it.
-  const fresh = await editOf(fakeDb({ wa_message: [] }).db, { md: greenEdit("gone-1", "hello"), chatId: TEAM, text: "hello (edited)", mine: false });
+  const fresh = await editOf(fakeDb({ wa_message: [] }).db, { md: editMsg("gone-1", "hello"), chatId: TEAM, text: "hello (edited)", mine: false });
   assert.deepEqual(fresh, { id: "gone-1", text: "hello (edited)", quotedId: null, done: false, note: null, answers: null });
 });
 
@@ -357,7 +357,7 @@ test("a file's caption edited: its tag, and what's in it, stays first; other wor
     ],
   });
   assert.equal((await editOf(f.db, { md: { typeMessage: "editedMessage", editedMessageData: { caption: "the new one", stanzaId: "p-1" } }, chatId: TEAM, text: "the new one (edited)", mine: false }))?.text, "[photo: a red logo on white] the new one (edited)");
-  assert.equal((await editOf(f.db, { md: greenEdit("t-1", "call Acme now"), chatId: TEAM, text: "call Acme now (edited)", mine: false }))?.text, "call Acme now (edited)");
+  assert.equal((await editOf(f.db, { md: editMsg("t-1", "call Acme now"), chatId: TEAM, text: "call Acme now (edited)", mine: false }))?.text, "call Acme now (edited)");
   assert.deepEqual(f.tables.wa_message!.map((m) => m.text), ["[photo: a red logo on white] the new one (edited)", "call Acme now (edited)"]);
   // A new caption in brackets of its own: the file's tag still comes first.
   const caption = { md: { typeMessage: "editedMessage", editedMessageData: { caption: "[final] the logo", stanzaId: "p-1" } }, chatId: TEAM, text: "[final] the logo (edited)", mine: false };
@@ -369,7 +369,7 @@ test("an edit of one kept without its words (a team group not watched): still wi
     wa_message: [{ id: "sara-1", chat_id: TEAM, sender_id: SARA.sender, phone: SARA.phone, sender_name: null, from_bot: false, text: null, quoted_id: null, sent_at: ago(60_000) }],
     bot_heard: [{ id: "order:sara-1" }],
   });
-  const e = await editOf(f.db, { md: greenEdit("sara-1", "@iklipse remind Omar about the Acme logo files"), chatId: TEAM, text: "@iklipse remind Omar about the Acme logo files (edited)", mine: false });
+  const e = await editOf(f.db, { md: editMsg("sara-1", "@iklipse remind Omar about the Acme logo files"), chatId: TEAM, text: "@iklipse remind Omar about the Acme logo files (edited)", mine: false });
   assert.equal(e?.done, true);
   assert.deepEqual(f.tables.wa_message!.map((m) => [m.id, m.text]), [["sara-1", null]]);
 });
@@ -381,7 +381,7 @@ test("privately: kept on the message in the private chat; acted on by any of the
     wa_bot_turn: [{ id: "turn-1" }],
     wa_message: [],
   });
-  const e = await editOf(f.db, { md: greenEdit("dm-1", "send me the Acme invoice"), chatId: `${OMAR.phone}@c.us`, text: "send me the Acme invoice (edited)", mine: false });
+  const e = await editOf(f.db, { md: editMsg("dm-1", "send me the Acme invoice"), chatId: `${OMAR.phone}@c.us`, text: "send me the Acme invoice (edited)", mine: false });
   assert.deepEqual(e, { id: "dm-1", text: "send me the Acme invoice (edited)", quotedId: null, done: true, note: null, answers: null });
   assert.equal(f.tables.wa_dm![0]!.text, "send me the Acme invoice (edited)");
   for (const [mark, id] of [["x-1", "x-1"], ["follow:x-2", "x-2"], ["target:x-3", "x-3"]]) {

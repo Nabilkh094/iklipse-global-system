@@ -485,7 +485,7 @@ function BotNote({ ov, onSettings }: { ov: WatchOverview; onSettings: () => void
   let text: ReactNode = null;
   let action: ReactNode = null;
   if (!bot.configured) {
-    text = "The WhatsApp bot isn't set up: its Green API connection is missing.";
+    text = "The WhatsApp bot isn't set up: link its number in Connected accounts > WhatsApp.";
   } else if (!bot.hook_at) {
     text = "The bot's WhatsApp doesn't send its messages here yet.";
     action = (
@@ -736,7 +736,7 @@ function GroupsTab({ ov }: { ov: WatchOverview }) {
         <div className="py-3 text-sm text-muted flex flex-wrap gap-x-5 gap-y-1">
           <span className="inline-flex items-center gap-1.5">
             <Smartphone size={14} />
-            {bot?.phone ? `+${bot.phone}` : bot?.instance ? `Green API ${bot.instance}` : "Not set up"}
+            {bot?.phone ? `+${bot.phone}` : "Not set up"}
           </span>
           <span className={cn(botStateText(bot?.state).ok ? "text-success" : "text-warn")}>{botStateText(bot?.state).text}</span>
           {bot?.hook_at && <span>Last message {relativeTime(bot.hook_at)}</span>}

@@ -6,8 +6,8 @@
 // their words, so none are searched or found (search.ts, look.ts). Their talk
 // with each other isn't kept. No files read, no alerts.
 //
-// An edit (Green API's editedMessage; WAHA's message.edited, made into that
-// in waha.ts) isn't a new message: it's the one it changes, with new words.
+// An edit (WAHA's message.edited, made into an editedMessage in waha.ts)
+// isn't a new message: it's the one it changes, with new words.
 // The words are kept on that one, and it goes on as that one, by its id, so
 // nothing done with it (an order, a reminder, a post, an answer: each once per
 // id, people.ts firstTime) is done twice. One the bot already acted on goes no
@@ -130,7 +130,7 @@ export async function editOf(
   const answered = (replies ?? []).map((r) => str(r.id));
   // It answered the bot's question about a reply, still waiting (dm.ts): what it quoted, or the bot's answer to it ("I didn't
   // send it..."), is one of the question's messages. Its new words answer it now; one decided (sent, dropped) isn't opened
-  // again. Once per edit: by its own id, else (Green API may give it the id of the one it changes) by its words.
+  // again. Once per edit: by its own id, else (it may come with the id of the one it changes) by its words.
   for (const q of [quotedId, ...answered]) {
     if (!q || !(await draftFor(db, chat, q))) continue;
     const lid = str(was?.sender_id);

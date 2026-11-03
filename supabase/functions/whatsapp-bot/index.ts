@@ -1,6 +1,6 @@
 // whatsapp-bot — the WhatsApp watch (0067).
 //
-// The bot's WhatsApp (Green API) sits in client groups. Every group message
+// The bot's WhatsApp (its own bridge, WAHA: waha.ts) sits in client groups. Every group message
 // comes here (hook) and is kept (for good since 0086). Once a group goes quiet for a
 // minute, Claude reads its new messages and opens an alert when a client is
 // left without a reply, or someone promises something (the team: "I'll send it
@@ -43,10 +43,10 @@
 // the bot only (history.ts).
 // The settings, the team, Cairo time and Claude are in kit.ts.
 //
-// POST /whatsapp-bot/hook     Green API webhooks (Authorization: Bearer WATCH_HOOK_TOKEN)
-// POST /whatsapp-bot/waha     the bot's own bridge's webhooks (WAHA, 0097, waha.ts; the same token)
+// POST /whatsapp-bot/waha     the bot's own bridge's webhooks (WAHA, 0097, waha.ts; Authorization: Bearer WATCH_HOOK_TOKEN)
 // POST /whatsapp-bot/slack    Slack's events (signed with the app's signing secret)
 // POST /whatsapp-bot/tick     X-Iklipse-Secret (the database, every minute)
+// POST /whatsapp-bot/notify   X-Iklipse-Secret { to, text }: a notification to a member, sent on the bot's number (0135 _send_whatsapp)
 // POST /whatsapp-bot/selftest X-Iklipse-Secret -> { ok, text }: the voice speaks a line and it's written out again
 // POST /whatsapp-bot/decline  ?c=<call>&s=<signature>: Decline on the call's notification
 // POST /whatsapp-bot/pair     { code, token, device, version }: the Android app links a phone
@@ -57,25 +57,24 @@
 //   test_call  -> { call }           Ikli calls me now
 //   hush       { call }              answered here: my phone stops ringing
 // admins:
-//   connect    -> { state, phone }   point the Green API instance's webhooks here
+//   connect    -> { state, phone }   point the bridge's webhooks here
 //   status     -> { state, phone }
 //   sync       -> { groups }         re-read the bot's groups and who is in them
 //   slack_status -> { ok, team, url, error? }  check the Slack app's token
 //   slack_sync -> { channels, read }  re-read the Slack app's channels and who is in them
-//   waha_status -> { ready, state, phone, name, qr, provider }  the bridge, and its QR code while it waits
+//   waha_status -> { ready, state, phone, name, qr }  the bridge, and its QR code while it waits
 //   waha_start                       make the bridge's session (its webhooks here) and start it
 //   waha_code  { phone } -> { code } link by a code typed on the phone instead
 //   waha_logout                      unlink the number
-//   waha_use   { provider }          the bot sends and reads through "waha" or "green"
 //   waha_info  -> { server, status, presence, phone, profile, capping, timelock, webhook, settings }
-//   waha_restart, waha_stop          the session restarted, or stopped (not while the bot uses it)
+//   waha_restart, waha_stop          the session restarted, or stopped (the bot is off WhatsApp until it starts)
 //   waha_profile { profile: { name?, about?, picture?: { mimetype, data } | null } }
 //   waha_settings { settings }       how fast it answers, seen, typing, online (0098) -> waha_info
 //
 // Secrets: ANTHROPIC_API_KEY, ELEVEN_API_KEY (ELEVEN_VOICE_ID, ELEVEN_MODEL),
 // WATCH_WEBHOOK_SECRET, WATCH_HOOK_TOKEN, FCM_SERVICE_ACCOUNT_B64 (the Firebase
-// service account JSON, base64). Green API (Users page) and the Slack app
-// (Alerts > Slack) are kept in the vault.
+// service account JSON, base64), WAHA_URL and WAHA_API_KEY (waha.ts). The Slack
+// app (Alerts > Slack) is kept in the vault.
 // Deploy with --no-verify-jwt.
 
 import { caller, cors, HttpError, json, route, same, serviceClient, SUPABASE_URL, toResponse } from "../_shared/oauth.ts";
@@ -101,7 +100,7 @@ import { askAgain, clientByPhone, decideDraft, draftFor, keepDm, quietMs, readDm
 import { bookedOrders, followOrder, fromTarget, nagOrders, notTheTeam, onTheTeam, orderAt, orderOf, takeOrder } from "./orders.ts";
 import { fileOf, keepFile, keepFiles, noteFile, spoken, voiceToBot, wordsOf, writeOut } from "./files.ts";
 import { VOICE } from "./voice.ts";
-import { toGreen, wahaCall, wahaCode, wahaEnsure, wahaInfo, wahaLogout, wahaMissed, wahaProfile, wahaRestart, wahaSettings, wahaStatus, wahaStop } from "./waha.ts";
+import { toHook, wahaCall, wahaCode, wahaEnsure, wahaInfo, wahaLogout, wahaMissed, wahaProfile, wahaRestart, wahaSettings, wahaStatus, wahaStop } from "./waha.ts";
 import { lidPhones, linkTeamLids, mentionNamer } from "./timeline.ts";
 import { writeDayNotes } from "./daynotes.ts";
 import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
@@ -133,14 +132,9 @@ logAiCallsTo(async (row) => {
 });
 
 interface Config {
-  greenapi_url: string | null;
-  greenapi_instance: string | null;
-  greenapi_token: string | null;
   slack_bot_token: string | null;
   slack_signing_secret: string | null;
   app_url: string | null;
-  /** Which WhatsApp the bot uses (0097): Green API, or its own bridge (waha.ts). */
-  provider: "green" | "waha";
 }
 
 interface Alert {
@@ -163,7 +157,7 @@ interface Alert {
 
 const digits = (s: unknown) => (typeof s === "string" ? s : "").replace(/\D/g, "");
 
-/** The number in a WhatsApp id (2010...@c.us), or a number Green API sends as one, if it is one. */
+/** The number in a WhatsApp id (2010...@c.us), or a number sent as one, if it is one. */
 function phoneOf(id: unknown): string | null {
   const s = typeof id === "number" ? String(id) : str(id);
   if (!/@c\.us$/.test(s) && !/^\+?\d+$/.test(s)) return null;
@@ -218,14 +212,9 @@ async function settings(db: Db): Promise<Settings> {
 }
 
 async function config(db: Db): Promise<Config> {
-  const [{ data, error }, p] = await Promise.all([db.rpc("_watch_config"), provider(db)]);
+  const { data, error } = await db.rpc("_watch_config");
   if (error) throw new Error(error.message);
-  return { ...(data as Config), provider: p };
-}
-
-async function provider(db: Db): Promise<Config["provider"]> {
-  const { data } = await db.from("watch_settings").select("wa_provider").eq("id", 1).single();
-  return data?.wa_provider === "waha" ? "waha" : "green";
+  return data as Config;
 }
 
 async function team(db: Db): Promise<Team> {
@@ -265,60 +254,20 @@ async function team(db: Db): Promise<Team> {
   return { people, byPhone, byLid, others };
 }
 
-// ------------------------------------------------------------- Green API --
+// -------------------------------------------------------------- WhatsApp --
 
-/** A Green API call, made on the bot's own bridge instead when it uses that (waha.ts). */
-async function green<T>(cfg: Config, method: string, body?: Record<string, unknown>): Promise<T> {
-  if (cfg.provider === "waha") return await wahaCall<T>(method, body);
-  if (!cfg.greenapi_url || !cfg.greenapi_instance || !cfg.greenapi_token) {
-    throw new HttpError(409, "The WhatsApp (Green API) connection isn't set up");
-  }
-  const res = await fetch(
-    `${cfg.greenapi_url}/waInstance${cfg.greenapi_instance}/${method}/${cfg.greenapi_token}`,
-    body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-  );
-  const text = await res.text();
-  if (!res.ok) {
-    let msg = text.slice(0, 200);
-    try {
-      const j = JSON.parse(text);
-      msg = j.message || j.error || msg;
-    } catch {
-      /* plain text */
-    }
-    throw new HttpError(502, `WhatsApp (Green API): ${msg || `error ${res.status}`}`);
-  }
-  try {
-    return (text ? JSON.parse(text) : {}) as T;
-  } catch {
-    return {} as T;
-  }
-}
-
-/** Point the instance's webhooks at this function, then read its state. */
-async function connect(db: Db, cfg: Config) {
+/** Point the bridge's webhooks at this function, then read its state. */
+async function connect(db: Db) {
   if (!HOOK_TOKEN) throw new HttpError(500, "WATCH_HOOK_TOKEN isn't set on the whatsapp-bot function");
-  if (cfg.provider === "waha") {
-    await wahaEnsure(`${BASE}/waha`, HOOK_TOKEN);
-    return await botStatus(db, cfg);
-  }
-  await green(cfg, "setSettings", {
-    webhookUrl: `${BASE}/hook`,
-    webhookUrlToken: HOOK_TOKEN,
-    incomingWebhook: "yes",
-    outgoingMessageWebhook: "yes",
-    outgoingAPIMessageWebhook: "yes",
-    stateWebhook: "yes",
-    outgoingWebhook: "no",
-  });
-  return await botStatus(db, cfg);
+  await wahaEnsure(`${BASE}/waha`, HOOK_TOKEN);
+  return await botStatus(db);
 }
 
-async function botStatus(db: Db, cfg: Config) {
-  const st = await green<{ stateInstance?: string }>(cfg, "getStateInstance");
+async function botStatus(db: Db) {
+  const st = await wahaCall<{ stateInstance?: string }>("getStateInstance");
   let phone: string | null = null;
   try {
-    const s = await green<{ wid?: string }>(cfg, "getSettings");
+    const s = await wahaCall<{ wid?: string }>("getSettings");
     phone = phoneOf(s.wid);
   } catch {
     /* the state is what matters */
@@ -336,7 +285,7 @@ interface GroupData {
 
 /** Who is in a group now (and its name). An empty list means the bot was taken out. */
 async function syncGroup(db: Db, cfg: Config, chatId: string) {
-  const d = await green<GroupData>(cfg, "getGroupData", { groupId: chatId });
+  const d = await wahaCall<GroupData>("getGroupData", { groupId: chatId });
   const parts = (d.participants ?? []).filter((p) => p.id || p.lid);
   const now = iso();
   if (!parts.length) {
@@ -375,7 +324,7 @@ async function syncGroup(db: Db, cfg: Config, chatId: string) {
 
 /** Every group the bot is in: new ones added, ones it left marked, a few read now. */
 async function syncAll(db: Db, cfg: Config, deadline: number) {
-  const chats = await green<{ id?: string; name?: string; type?: string }[]>(cfg, "getChats");
+  const chats = await wahaCall<{ id?: string; name?: string; type?: string }[]>("getChats");
   const groups = (Array.isArray(chats) ? chats : []).filter((c) => str(c.id).endsWith("@g.us"));
   const ids = groups.map((g) => str(g.id));
   const { data: known } = await db.from("wa_group").select("chat_id, left_at");
@@ -466,36 +415,26 @@ function hookAllowed(req: Request) {
   return !!HOOK_TOKEN && same(tok, HOOK_TOKEN);
 }
 
-/** Green API's webhooks; left alone while the bot uses its own bridge. */
-async function hook(req: Request, db: Db): Promise<Response> {
-  if (!hookAllowed(req)) return new Response("Forbidden", { status: 403 });
-  const b = (await req.json().catch(() => null)) as Hook | null;
-  if (!b || (await provider(db)) === "waha") return json({ ok: true });
-  return await onHook(b, db);
-}
-
-/** The bridge's webhooks (waha.ts), as Green API's: its state always kept, messages only while the bot uses it. */
+/** The bridge's webhooks (waha.ts), in the bot's own shape (Hook). */
 async function wahaHook(req: Request, db: Db): Promise<Response> {
   if (!hookAllowed(req)) return new Response("Forbidden", { status: 403 });
   const ev = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!ev) return json({ ok: true });
-  const using = (await provider(db)) === "waha";
-  if (!using && str(ev.event) !== "session.status") return json({ ok: true });
-  const b = await toGreen(db, ev);
-  if (!b || !using) return json({ ok: true });
+  const b = await toHook(db, ev);
+  if (!b) return json({ ok: true });
   return await onHook(b as Hook, db);
 }
 
 /**
  * Every 15 minutes on the bridge: what came in over the last hour that the bot
  * never got (a webhook lost while the function was down), handled as its
- * webhook would have been. Each one once: toGreen keeps it in waha_msg first.
+ * webhook would have been. Each one once: toHook keeps it in waha_msg first.
  */
 async function catchUp(db: Db, deadline: number) {
   let n = 0;
   for (const ev of await wahaMissed(db)) {
     if (Date.now() > deadline) break;
-    const b = await toGreen(db, ev);
+    const b = await toHook(db, ev);
     if (!b) continue;
     await onHook(b as Hook, db);
     n++;
@@ -1342,9 +1281,9 @@ async function brainDeps(db: Db): Promise<Deps> {
 const sendFileAs =
   (cfg: Config): SendFile =>
   async (chatId, f) => {
-    const r = await green<{ idMessage?: string }>(cfg, "sendFileByUrl", { chatId, urlFile: f.url, fileName: f.name, mimetype: f.mime, ...(f.caption ? { caption: f.caption } : {}) });
+    const r = await wahaCall<{ idMessage?: string }>("sendFileByUrl", { chatId, urlFile: f.url, fileName: f.name, mimetype: f.mime, ...(f.caption ? { caption: f.caption } : {}) });
     const id = r.idMessage ?? null;
-    if (id && cfg.provider === "waha" && chatId.endsWith("@c.us")) {
+    if (id && chatId.endsWith("@c.us")) {
       const text = `[document: ${f.name}]${f.caption ? ` ${f.caption}` : ""}`;
       const { error } = await serviceClient().from("wa_dm").upsert({ id, chat_id: chatId, from_bot: true, sender_name: null, text, quoted_id: null, sent_at: iso() }, { onConflict: "id" });
       if (error) console.error("keep sent", error.message);
@@ -1405,13 +1344,11 @@ const sendAs =
   async (chatId, said, quotedId, mentions) => {
     // Links go out as they are (Calendly's own, not shortened).
     const text = said;
-    // The numbers tagged in it ("@2010..."): on WAHA real tags only when named to it (waha.ts sendTextBody).
-    const tags = cfg.provider === "waha" && mentions?.length ? { mentions } : {};
-    const r = await green<{ idMessage?: string }>(cfg, "sendMessage", { chatId, message: text, ...(quotedId ? { quotedMessageId: quotedId } : {}), linkPreview: false, ...tags });
+    // The numbers tagged in it ("@2010..."): real tags only when named to WAHA (waha.ts sendTextBody).
+    const tags = mentions?.length ? { mentions } : {};
+    const r = await wahaCall<{ idMessage?: string }>("sendMessage", { chatId, message: text, ...(quotedId ? { quotedMessageId: quotedId } : {}), linkPreview: false, ...tags });
     const id = r.idMessage ?? null;
-    // On WAHA, kept as the bot's now: it may not echo it, or echo it in another chat, or as theirs (0104).
-    // (On Green API the echo keeps it: until then it's still queued on the phone, kit.ts stillQueued.)
-    if (cfg.provider !== "waha") return id;
+    // Kept as the bot's now: WAHA may not echo it, or echo it in another chat, or as theirs (0104).
     const phone = phoneOf(chatId);
     const chat = phone ? `${phone}@c.us` : chatId.endsWith("@lid") ? chatId : null;
     if (id && chatId.endsWith("@g.us")) {
@@ -1882,7 +1819,7 @@ async function tick(db: Db) {
     // Groups reported on privately every so often (report.ts, 0125), in working hours.
     ...(s.enabled ? [{ name: "reports", ms: 90_000, run: async (deadline: number) => void (!quietNow(s) && !dayOff(s) && (out.reports = await sendReports(db, s, sendAs(cfg), (await directory(db)).team, t, deadline))) }] : []),
     // Messages the bridge has that never reached the bot, every 15 minutes (catchUp).
-    ...(s.enabled && cfg.provider === "waha" && new Date(t0).getUTCMinutes() % 15 === 0
+    ...(s.enabled && new Date(t0).getUTCMinutes() % 15 === 0
       ? [{ name: "catch-up", ms: 60_000, run: async (deadline: number) => void (out.caught = await catchUp(db, deadline)) }]
       : []),
     // What was said, cut into pieces for search and embedded (search.ts, 0113): what's new first, then the backfill.
@@ -1934,7 +1871,7 @@ async function whatsappTick(
     if (oe) out.errors.push(`others: ${oe.message}`);
     out.clients = await learnPeople(db, t, s.bot_phone, deadline - 40_000);
     // Clients known only by their number: the name on their WhatsApp profile (0100).
-    out.named = await lookUpNames(db, t, (chatId) => green(cfg, "getContactInfo", { chatId }), deadline - 40_000);
+    out.named = await lookUpNames(db, t, (chatId) => wahaCall("getContactInfo", { chatId }), deadline - 40_000);
     if (!quietNow(s) && !dayOff(s)) out.asked = await askNow(db, s, sendAs(cfg));
   } catch (e) {
     out.errors.push(`people: ${(e as Error).message}`);
@@ -2004,20 +1941,12 @@ Deno.serve(async (req) => {
   const path = new URL(req.url).pathname.split("/").filter(Boolean);
   if (path.at(-2) === "brain-tools") return await brainApi(req, r, () => brainDeps(db));
 
-  if (r === "hook") {
-    try {
-      return await hook(req, db);
-    } catch (e) {
-      console.error("hook", (e as Error).message);
-      return json({ ok: false }, 200); // Green API retries failed webhooks; one bad message shouldn't loop.
-    }
-  }
   if (r === "waha") {
     try {
       return await wahaHook(req, db);
     } catch (e) {
       console.error("waha hook", (e as Error).message);
-      return json({ ok: false }, 200); // WAHA retries too.
+      return json({ ok: false }, 200); // WAHA retries failed webhooks; one bad message shouldn't loop.
     }
   }
   if (r === "slack") {
@@ -2062,6 +1991,20 @@ Deno.serve(async (req) => {
       return json({ error: (e as Error).message }, 500);
     }
   }
+  // iklipse's own notifications on WhatsApp (a member's channel, automations, the admin's test): the database asks.
+  if (r === "notify") {
+    if (!TICK_SECRET || !same(req.headers.get("x-iklipse-secret") ?? "", TICK_SECRET)) return new Response("Forbidden", { status: 403 });
+    const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const to = phoneOf(str(b.to));
+    const text = str(b.text).slice(0, 4000);
+    if (!to || !text.trim()) return json({ ok: false, error: "A number and words are needed" }, 400);
+    try {
+      return json({ ok: true, id: await sendAs(await config(db))(`${to}@c.us`, text) });
+    } catch (e) {
+      console.error("notify", (e as Error).message);
+      return json({ ok: false, error: (e as Error).message }, 502);
+    }
+  }
   try {
     const me = await caller(req, db);
     const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -2086,9 +2029,9 @@ Deno.serve(async (req) => {
     if (p?.role !== "admin") throw new HttpError(403, "Admins only");
     switch (b.action) {
       case "connect":
-        return json(await connect(db, cfg));
+        return json(await connect(db));
       case "status":
-        return json(await botStatus(db, cfg));
+        return json(await botStatus(db));
       case "sync":
         return json(await syncAll(db, cfg, Date.now() + 90_000));
       case "slack_status":
@@ -2096,49 +2039,30 @@ Deno.serve(async (req) => {
       case "slack_sync":
         return json(await slackSync(db, cfg.slack_bot_token, Date.now() + 90_000));
       case "waha_status":
-        return json({ ...(await wahaStatus(db)), provider: cfg.provider });
+        return json(await wahaStatus(db));
       case "waha_start":
         if (!HOOK_TOKEN) throw new HttpError(500, "WATCH_HOOK_TOKEN isn't set on the whatsapp-bot function");
         await wahaEnsure(`${BASE}/waha`, HOOK_TOKEN);
-        return json({ ...(await wahaStatus(db)), provider: cfg.provider });
+        return json(await wahaStatus(db));
       case "waha_code":
         return json(await wahaCode(str(b.phone)));
       case "waha_logout":
         await wahaLogout();
-        return json({ ...(await wahaStatus(db)), provider: cfg.provider });
+        return json(await wahaStatus(db));
       case "waha_info":
         return json(await wahaInfo(db, `${BASE}/waha`));
       case "waha_restart":
         await wahaRestart();
-        return json({ ...(await wahaStatus(db)), provider: cfg.provider });
+        return json(await wahaStatus(db));
       case "waha_stop":
-        if (cfg.provider === "waha") throw new HttpError(409, "The bot uses this number: go back to Green API first");
         await wahaStop();
-        return json({ ...(await wahaStatus(db)), provider: cfg.provider });
+        return json(await wahaStatus(db));
       case "waha_profile":
         await wahaProfile((b.profile ?? {}) as Record<string, unknown>);
         return json({ ok: true });
       case "waha_settings":
         await wahaSettings(db, (b.settings ?? {}) as Record<string, unknown>);
         return json(await wahaInfo(db, `${BASE}/waha`));
-      case "waha_use": {
-        const to = b.provider === "waha" ? "waha" : "green";
-        if (to === "waha") {
-          const w = await wahaStatus(db);
-          if (w.state !== "authorized") throw new HttpError(409, "Link a number to the bridge first");
-          // Its webhooks pointed here again, in case the function's address or token changed.
-          if (HOOK_TOKEN) await wahaEnsure(`${BASE}/waha`, HOOK_TOKEN);
-        }
-        await db.from("watch_settings").update({ wa_provider: to, bot_state: null }).eq("id", 1);
-        const now = { ...cfg, provider: to } as Config;
-        let bot: { state: string; phone: string | null } | null = null;
-        try {
-          bot = await botStatus(db, now);
-        } catch {
-          /* Green API not set up: the switch still holds */
-        }
-        return json({ provider: to, bot });
-      }
       default:
         throw new HttpError(400, "Unknown action");
     }

@@ -571,18 +571,5 @@ export async function countCall(db: Db, id: string, was = 0) {
 
 // --------------------------------------------------------------- sending --
 
-/**
- * The bot's last message to a private chat hasn't gone out yet (Green API
- * holds messages while the phone is offline): a reminder isn't queued behind
- * it, so they don't pile up and all go out at once when it's back. A message
- * is out once WhatsApp shows it (the hook keeps it in wa_dm).
- */
-export async function stillQueued(db: Db, chatId: string | null, id: string | null | undefined, sentAt?: string | null) {
-  if (!id || !chatId?.endsWith("@c.us")) return false;
-  if (sentAt && Date.now() - Date.parse(sentAt) > 3 * 60 * MIN) return false;
-  const { data } = await db.from("wa_dm").select("id").eq("id", id).maybeSingle();
-  return !data;
-}
-
 /** Reminders that go unanswered come less often: every, then twice that, 4 times... at most a day apart. */
 export const backoff = (everyMin: number, times: number) => Math.min(everyMin * 2 ** Math.max(0, Math.min(times, 6)), 24 * 60) * MIN;
