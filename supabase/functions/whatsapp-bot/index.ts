@@ -113,6 +113,8 @@ const VOICE_MODEL = env("ELEVEN_MODEL", "eleven_flash_v2_5");
 const TICK_SECRET = env("WATCH_WEBHOOK_SECRET");
 const HOOK_TOKEN = env("WATCH_HOOK_TOKEN");
 const PUSH_SECRET = env("PUSH_WEBHOOK_SECRET");
+// The owner's own Claude's group (personal/relay.mjs on the server answers there): the bot stays out of it.
+const PERSONAL_GROUP = env("PERSONAL_GROUP");
 const BASE = `${SUPABASE_URL}/functions/v1/whatsapp-bot`;
 const BUCKET = "watch-audio";
 /** No new work is started after this long (the function has about 150 seconds). */
@@ -515,7 +517,7 @@ async function onHook(b: Hook, db: Db): Promise<Response> {
 
   const sd = b.senderData ?? {};
   const chatId = str(sd.chatId);
-  if (!b.idMessage) return json({ ok: true });
+  if (!b.idMessage || (PERSONAL_GROUP && chatId === PERSONAL_GROUP)) return json({ ok: true });
   const m = readMessage(b.messageData);
   if (!m || !m.text) return json({ ok: true });
   // An edit isn't a new message (keep.ts): it's the one it changes, with new words, and goes on as that one

@@ -1,0 +1,33 @@
+# The owner's own Claude from one WhatsApp group (relay.mjs), on claude-vps.
+# /etc/systemd/system/claude-me-relay.service (README.md).
+#
+# Root only to start Claude Code as the claude-me user. GROUP and OWNERS come
+# from /etc/claude-me/relay.conf; the WAHA key from a root-only file handed
+# over by systemd, never to Claude.
+
+[Unit]
+Description=Owner's own Claude on WhatsApp (one group)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/claude-me/relay.mjs
+Environment=NODE_ENV=production
+Environment=WAHA_URL=http://127.0.0.1:3000
+Environment=CLAUDE_USER=claude-me
+Environment=CLAUDE_BIN=/usr/local/bin/claude
+EnvironmentFile=/etc/claude-me/relay.conf
+LoadCredential=waha.key:/etc/claude-me/waha.key
+StateDirectory=claude-me-relay
+StateDirectoryMode=0700
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
