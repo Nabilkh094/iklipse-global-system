@@ -30,8 +30,16 @@ English.
 |---|---|---|
 | **Claude** (Anthropic) | worker + default Central Agent | `claude` CLI, Nabil's subscription. Already done |
 | **GPT** (OpenAI) | worker | `codex` CLI, "Sign in with ChatGPT" (device code on a headless server), run with `codex exec --json` |
-| **Grok** (xAI) | worker | To decide: xAI API key (api.x.ai), or the Cursor CLI if Nabil has Cursor and wants Grok through it. A Grok subscription login for servers is not assumed |
-| **Jev** (Typesafe AI) | **router**: picks agent, model and effort. It decides, it does not write the answers | Typesafe API key, early access. Fallback when there is no access: Claude Haiku with the same questions |
+| **Grok** (xAI) | worker | Grok subscription (SuperGrok / X Premium+) through xAI's own `grok` CLI (Grok Build): `grok login`, then headless `grok -p … --output-format streaming-json`, sessions with `-s`/`-r`. To check on install: that `grok login` works on a server with no browser. If it doesn't, xAI's documented headless sign-in through OpenCode ("xAI Grok OAuth (Headless / Remote / VPS)"), still the subscription. No API key |
+| **Jev** (Typesafe AI) | **router and judge**, never a writer (see below) | Typesafe API key, early access. Fallback when there is no access: Claude Haiku asked the same questions |
+
+### Why Jev only routes
+Jev is built to never write text: it only answers questions whose possible answers are set in advance (pick one of up to 255 choices, a score, or yes/no), each with a probability, in 70–500 ms, for $0.042 per million input tokens (output free). So it can't answer Nabil or write code. It can make every quick decision in the system:
+- **Route:** which agent, model and effort for a task (the main job).
+- **Guard:** is this step sensitive (deploy, delete, send outside, pay)? If yes, it waits for Nabil's yes.
+- **Judge:** in team compare, score each worker's answer so the Central Agent starts from the best one.
+- **Done or not:** did the worker actually finish what was asked, or should it go again?
+- **Triage:** is a message a new task, a follow-up to a chat, or a command?
 
 Rules taken from the brief and from the videos:
 - No cookies, no browser tricks, no unofficial tokens. If a provider needs an API key or a paid plan for server use, we say so and use that.
@@ -70,10 +78,10 @@ Each phase ends working and tested, and is installed only after you say go.
 - Parallel limit stays small (see "Server size").
 - Anything sensitive (deploy, merge, delete, sending to people outside the group, spending money) waits for Nabil's "yes" in the group before it runs.
 
-### Phase 5: money and limits
-- Usage per provider per day and week kept in `state.json` (no Postgres/Redis needed for one user on this server).
-- A weekly cap per provider; at 80% a warning, at 100% that provider is skipped by auto/team.
-- `/usage` shows the week so far.
+### Phase 5: usage you can see (no caps)
+- No spending caps: nothing is ever blocked for cost.
+- `/usage` shows what each provider was used for this week, from what the CLIs report.
+- Auto mode still prefers a provider that has room left, so a task doesn't stop halfway on a subscription limit.
 
 ### Phase 6: Slack (the flowchart's second interface)
 - Same commands from one Slack channel, owner only. Needs a Slack app made by you (bot token + signing secret). Starts only after phases 1–5 work on WhatsApp.
@@ -84,11 +92,11 @@ Each phase ends working and tested, and is installed only after you say go.
 - LangGraph / LiteLLM: not needed. LiteLLM doesn't use CLI logins, and the relay already does the queueing.
 
 ## Server size
-Each CLI run takes about 300–600 MB. With WAHA, the brain and Whisper on 3.7 GB, two runs at once is the safe limit now. Team mode with three workers needs the next size up (CX33, 8 GB). Resizing is a server change, so it is your call.
+Each agent working takes about 300–600 MB of memory while it runs. The server has 3.7 GB; WAHA, the brain and the rest use about 1 GB, and a voice note being written out takes about 1 GB more for a moment. So two agents at once is safe; more requests wait their turn. Team mode with three or four workers at once could fill the memory, and then Linux kills programs, possibly WAHA, which takes WhatsApp down until it restarts. The next size up (CX33, 8 GB) removes that. Resizing is a server change, so it is your call.
 
 ## What I need from you before building
 1. **GPT:** Nabil signs in to `codex` on the server (I start it, he opens the link and types the code).
-2. **Grok:** xAI API key, or Cursor CLI? Whichever it is, the key or login is set by you, not by me.
+2. **Grok:** Nabil's SuperGrok (or X Premium+) subscription, and he signs in to `grok` on the server the same way.
 3. **Jev:** do you have early access? If yes, you set the Typesafe key on the server.
 4. **Server:** resize to CX33 now, or keep 2 runs at once for now?
 
