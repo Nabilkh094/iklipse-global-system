@@ -17,6 +17,9 @@ Environment=NODE_ENV=production
 Environment=WAHA_URL=http://127.0.0.1:3000
 Environment=CLAUDE_USER=claude-me
 Environment=CLAUDE_BIN=/usr/local/bin/claude
+Environment=CODEX_BIN=/usr/local/bin/codex
+Environment=GROK_BIN=/home/claude-me/.grok/bin/grok
+Environment=JEV_KEY_FILE=/etc/claude-me/jev.key
 EnvironmentFile=/etc/claude-me/relay.conf
 LoadCredential=waha.key:/etc/claude-me/waha.key
 StateDirectory=claude-me-relay
@@ -27,7 +30,7 @@ TimeoutStopSec=20
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-MemoryMax=4G
+MemoryMax=6G
 
 [Install]
 WantedBy=multi-user.target

@@ -21,6 +21,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { chownSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PROVIDERS, argsFor, footer, providerOf, readerFor } from "./agents.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -71,7 +72,7 @@ export function newFromOwner(messages, owners, seen) {
 }
 
 /** The relay's own commands; anything else (a skill's "/name" too) goes to Claude as it is. */
-const COMMANDS = new Set(["help", "new", "clear", "chats", "switch", "resume", "rename", "cd", "model", "effort", "plan", "status", "stop"]);
+const COMMANDS = new Set(["help", "new", "clear", "chats", "switch", "resume", "rename", "cd", "model", "effort", "plan", "status", "stop", "use", "logins"]);
 
 /** {name, arg} for one of the relay's commands, or null for a request. */
 export function commandOf(text) {
@@ -127,7 +128,7 @@ export function chatsList(convs, cur, home) {
   if (!list.length) return "No chats yet.";
   return list
     .slice(0, 15)
-    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(untitled)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.model ? ` · ${c.model}` : ""}`)
+    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(untitled)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.provider && c.provider !== "claude" ? ` · ${PROVIDERS[c.provider]?.label ?? c.provider}` : ""}${c.model ? ` · ${c.model}` : ""}`)
     .join("\n");
 }
 
@@ -138,7 +139,9 @@ const HELP = [
   "/switch number go back to a chat (/resume does the same)",
   "/rename name name this chat",
   "/cd folder a new chat in a folder (inside ~/work, or a full path in ~)",
-  "/model name the model (opus, sonnet, haiku, fable, or the full name). No name: the default",
+  "/use claude|gpt|grok who answers in this chat",
+  "/logins which workers are signed in",
+  "/model name the model (for Claude: opus, sonnet, haiku, fable; or the full name). No name: the default",
   "/effort low|medium|high|xhigh|max",
   "/plan request makes a plan first without doing anything; then say go",
   "/status what's running",
@@ -167,7 +170,13 @@ function main() {
     group: process.env.GROUP || "",
     owners: new Set((process.env.OWNERS || "").split(",").map((s) => s.trim()).filter(Boolean)),
     user: process.env.CLAUDE_USER || "claude-me",
-    claude: process.env.CLAUDE_BIN || "/usr/local/bin/claude",
+    bins: {
+      claude: process.env.CLAUDE_BIN || "/usr/local/bin/claude",
+      gpt: process.env.CODEX_BIN || "/usr/local/bin/codex",
+      grok: process.env.GROK_BIN || `/home/${process.env.CLAUDE_USER || "claude-me"}/.grok/bin/grok`,
+    },
+    // Root-only, read by the relay itself; never handed to a worker.
+    jevKey: process.env.JEV_KEY_FILE || "/etc/claude-me/jev.key",
     state: join(process.env.STATE_DIRECTORY || "/var/lib/claude-me-relay", "state.json"),
     maxRun: Number(process.env.MAX_RUN_MIN || 60) * MIN,
     parallel: Number(process.env.MAX_PARALLEL || 2),
@@ -304,67 +313,74 @@ function main() {
   const runs = new Map(); // conversation id -> {child, started, step}
   const waiting = []; // [{conv, m, text, plan}]
 
-  /** One request to Claude in a conversation: its answer, or why there's none. Its latest step kept on the run. */
+  /** Which workers are signed in on the server, and whether Jev has its key. */
+  const logins = () => ({
+    ...Object.fromEntries(Object.entries(PROVIDERS).map(([p, d]) => [p, d.login(home) && existsSync(conf.bins[p])])),
+    jev: existsSync(conf.jevKey),
+  });
+
+  /**
+   * One request to the chat's worker: its answer, or why there's none. The
+   * latest step is kept on the run, for the progress line.
+   */
   const ask = (conv, text, plan) =>
     new Promise((done) => {
-      const args = [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--permission-mode",
-        plan ? "plan" : "bypassPermissions",
-        "--append-system-prompt",
-        SYSTEM,
-        ...(conv.model ? ["--model", conv.model] : []),
-        ...(conv.effort ? ["--settings", JSON.stringify({ effortLevel: conv.effort })] : []),
-        ...(conv.session ? ["--resume", conv.session] : []),
-      ];
-      const child = spawn(conf.claude, args, {
+      const provider = conv.provider ?? "claude";
+      const started = Date.now();
+      if (!existsSync(conf.bins[provider])) return done({ failed: `${PROVIDERS[provider].label} isn't installed on the server yet`, session: conv.session });
+      if (provider !== "claude" && !PROVIDERS[provider].login(home))
+        return done({ failed: `${PROVIDERS[provider].label} isn't signed in yet. On the server, as ${conf.user}: ${PROVIDERS[provider].signIn}`, session: conv.session });
+      // Claude gets the instructions as its system prompt; the others get them at the start of a new session.
+      const told = provider === "claude" || conv.session ? text : `[How to work here] ${SYSTEM}\n\n[The request]\n${text}`;
+      const prompt = plan && provider === "grok" ? `Only make a plan for this. Change nothing, run nothing that changes anything.\n\n${told}` : told;
+      const [args, onStdin] = argsFor(provider, { conv, plan, system: SYSTEM, cwd: conv.cwd });
+      const child = spawn(conf.bins[provider], onStdin ? args : [...args, prompt], {
         cwd: conv.cwd,
         uid,
         gid,
-        env: { HOME: home, USER: conf.user, LOGNAME: conf.user, LANG: "C.UTF-8", PATH: `${home}/.local/bin:/usr/local/bin:/usr/bin:/bin` },
+        env: { HOME: home, USER: conf.user, LOGNAME: conf.user, LANG: "C.UTF-8", PATH: `${home}/.local/bin:${home}/.grok/bin:/usr/local/bin:/usr/bin:/bin` },
         stdio: ["pipe", "pipe", "pipe"],
       });
-      const run = { child, started: Date.now(), step: null };
+      const reader = readerFor(provider, stepOf);
+      const run = {
+        child,
+        started,
+        get step() {
+          return reader.step;
+        },
+      };
       runs.set(conv.id, run);
       let buf = "";
       let err = "";
-      let result = null;
-      let session = conv.session;
+      const take = (line) => {
+        if (!line) return;
+        try {
+          reader.feed(JSON.parse(line));
+        } catch {}
+      };
       child.stdout.on("data", (d) => {
         buf += d;
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim();
+          take(buf.slice(0, nl).trim());
           buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let ev;
-          try {
-            ev = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (ev.session_id) session = ev.session_id;
-          if (ev.type === "result") result = ev;
-          if (ev.type === "assistant") {
-            for (const c of ev.message?.content ?? []) {
-              if (c.type === "tool_use") run.step = stepOf(c.name, c.input);
-            }
-          }
         }
       });
       child.stderr.on("data", (d) => (err += d));
+      child.on("error", (e) => (err += e.message));
       const timer = setTimeout(() => child.kill("SIGTERM"), conf.maxRun);
       child.on("close", (code, signal) => {
         clearTimeout(timer);
         runs.delete(conv.id);
-        if (result && typeof result.result === "string" && !result.is_error) return done({ text: result.result, session });
-        const why = String(result?.result || err || "").trim().split("\n").slice(-3).join(" ").slice(0, 300);
-        done({ failed: signal ? `stopped (${run.stopped ? "/stop" : signal === "SIGTERM" ? "it took too long" : signal})` : why || `exited with code ${code}`, session });
+        take(buf.trim());
+        const r = reader.result();
+        const session = r.session ?? conv.session;
+        const foot = footer({ provider, model: r.model ?? conv.model, effort: conv.effort, ms: Date.now() - started, cost: r.cost, usage: r.usage });
+        if (r.text && !signal) return done({ text: r.text, session, foot });
+        const why = String(r.error || err || "").trim().split("\n").slice(-3).join(" ").slice(0, 300);
+        done({ failed: signal ? `stopped (${run.stopped ? "/stop" : signal === "SIGTERM" ? "it took too long" : signal})` : why || `exited with code ${code}`, session, foot });
       });
-      child.stdin.end(text);
+      child.stdin.end(onStdin ? prompt : undefined);
     });
 
   /** A request in its conversation, start to answer: typing, a word on what it's doing when it's long, the answer. */
@@ -388,7 +404,7 @@ function main() {
     if (!conv.title) conv.title = text.replace(/^\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").slice(0, 40);
     let r = await ask(conv, text, plan);
     // A conversation Claude no longer has: a new one, in the same folder.
-    if (r.failed && conv.session && /no conversation found/i.test(r.failed)) {
+    if (r.failed && conv.session && /no conversation found|session not found|no session/i.test(r.failed)) {
       conv.session = null;
       r = await ask(conv, text, plan);
     }
@@ -398,7 +414,8 @@ function main() {
     conv.at = Date.now();
     save();
     const after = plan && !r.failed ? "\n\n(This is only a plan. Say go to start.)" : "";
-    await say(`${tag()}${r.failed ? `❌ Didn't finish: ${r.failed}` : (r.text || "(no reply)") + after}`, m.id, conv);
+    const foot = r.foot ? `\n\n${r.foot}` : "";
+    await say(`${tag()}${r.failed ? `❌ Didn't finish: ${r.failed}` : (r.text || "(no reply)") + after}${foot}`, m.id, conv);
   };
 
   /** What's waiting starts as soon as its conversation is free and fewer than the limit are running. */
@@ -436,6 +453,7 @@ function main() {
       case "new":
       case "clear": {
         const c = newConv(conv.cwd, arg);
+        c.provider = conv.provider;
         c.model = conv.model;
         c.effort = conv.effort;
         save();
@@ -466,6 +484,7 @@ function main() {
           for (let d = p; d !== home && d.startsWith(home); d = resolve(d, "..")) mine(d);
         }
         const c = newConv(p);
+        c.provider = conv.provider;
         c.model = conv.model;
         c.effort = conv.effort;
         save();
@@ -480,6 +499,27 @@ function main() {
         conv.effort = arg || null;
         save();
         return say(`✅ Effort in #${conv.n}: ${conv.effort ?? "the default"}`, m.id, conv);
+      case "use": {
+        const p = providerOf(arg);
+        if (!p) return say("/use claude | gpt | grok", m.id);
+        if (p === (conv.provider ?? "claude")) return say(`#${conv.n} already uses ${PROVIDERS[p].label}.`, m.id, conv);
+        // Until the handoff (phase 2) carries a chat over, another worker starts a new chat.
+        const c = conv.session ? newConv(conv.cwd, conv.title ? `${conv.title} (${PROVIDERS[p].label})` : "") : conv;
+        c.provider = p;
+        c.model = null;
+        c.effort = conv.effort;
+        save();
+        const ok = logins()[p];
+        return say(`✅ #${c.n} uses ${PROVIDERS[p].label}${c !== conv ? " (a new chat)" : ""}${ok ? "" : `\n⚠️ ${PROVIDERS[p].label} isn't signed in yet: ${PROVIDERS[p].signIn}`}`, m.id, c);
+      }
+      case "logins": {
+        const l = logins();
+        const line = (name, ok, how) => `${ok ? "✅" : "⏳"} ${name}${ok ? "" : `: ${how}`}`;
+        return say(
+          [...Object.entries(PROVIDERS).map(([p, d]) => line(d.label, l[p], `not signed in (${d.signIn})`)), line("Jev (router)", l.jev, "no key yet")].join("\n"),
+          m.id,
+        );
+      }
       case "plan":
         if (!arg) return say("/plan then your request", m.id);
         waiting.push({ conv, m, text: await words({ ...m, body: arg }), plan: true });
@@ -492,7 +532,7 @@ function main() {
             const q = waiting.filter((w) => w.conv.id === c.id).length;
             return `#${c.n} ${c.title || ""}: ${r ? `working ${Math.round((Date.now() - r.started) / MIN)} min${r.step ? ` · ${r.step}` : ""}` : "waiting"}${q ? ` · ${q} queued` : ""}`;
           });
-        return say(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${conv.model ?? "the default model"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "Nothing running."}`, m.id);
+        return say(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${PROVIDERS[conv.provider ?? "claude"].label} · ${conv.model ?? "the default model"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "Nothing running."}`, m.id);
       }
       case "stop": {
         const before = waiting.length;

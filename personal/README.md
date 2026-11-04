@@ -33,7 +33,7 @@ number. Separate from the bot and the brain: those stay on the API key.
 ```bash
 useradd -m -s /bin/bash claude-me && mkdir -p /home/claude-me/work && chown -R claude-me: /home/claude-me/work
 npm install -g @anthropic-ai/claude-code
-install -d -m 0755 /opt/claude-me && install -m 0644 personal/relay.mjs /opt/claude-me/relay.mjs
+install -d -m 0755 /opt/claude-me && install -m 0644 personal/relay.mjs personal/agents.mjs /opt/claude-me/
 install -d -m 0700 /etc/claude-me
 grep ^WAHA_API_KEY= /opt/waha/.env | cut -d= -f2- > /etc/claude-me/waha.key && chmod 600 /etc/claude-me/waha.key
 printf 'GROUP=%s\nOWNERS=%s\n' '<group id>@g.us' '<lid>@lid,<number>@c.us' > /etc/claude-me/relay.conf
@@ -48,5 +48,35 @@ sudo -iu claude-me claude
 
 then `/login`, and `/mcp` to see the claude.ai connectors that came with it.
 GitHub: `sudo -iu claude-me gh auth login`. Google Drive: `sudo -iu claude-me rclone config`.
+
+## The other workers and Jev (PLAN-normal-agents.md)
+
+`/use claude|gpt|grok` picks who answers in a chat; `/logins` shows who is signed
+in. Each one uses its own official CLI and the owner's own login, run as
+`claude-me` like Claude. Until a worker is signed in, the group says so instead of
+running it.
+
+Install, as root:
+
+```bash
+npm install -g @openai/codex
+sudo -iu claude-me bash -c 'curl -fsSL https://x.ai/cli/install.sh | bash'
+```
+
+The owner signs in (each shows a link and a code to open on the phone):
+
+```bash
+sudo -iu claude-me codex login --device-auth
+sudo -iu claude-me /home/claude-me/.grok/bin/grok login
+```
+
+GPT needs a ChatGPT plan; Grok needs SuperGrok or X Premium+.
+
+Jev (the router; it never answers by itself): the TypeSafe key in a root-only
+file the relay reads; it never reaches a worker.
+
+```bash
+install -m 600 /dev/null /etc/claude-me/jev.key && nano /etc/claude-me/jev.key
+```
 
 Logs: `journalctl -u claude-me-relay -f`.
