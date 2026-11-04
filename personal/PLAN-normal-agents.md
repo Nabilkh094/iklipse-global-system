@@ -161,3 +161,12 @@ Each agent working takes about 300–600 MB of memory while it runs. The server 
 - Branch `feat/normal-agents`, on top of `feat/personal-claude` (PR #71, not merged yet).
 - One commit per phase; tests run before each commit.
 - Install on the server only on your go, with the old `relay.mjs` kept as a backup for rollback.
+
+## Status (2026-11-05)
+- Server resized to CX33 (4 vCPU, 8 GB); disk kept at 40 GB so it can go back.
+- codex 0.166 and grok 1.0.70 installed for `claude-me`. Not signed in yet.
+- Jev key in place and checked: a real routing call answered in 312 ms (jev-1.14.0).
+- Phases 1–7 built on `feat/normal-agents`: 25 unit tests and the end-to-end run against a fake WAHA and fake CLIs on the server (17/17) pass. Not installed on the live relay yet.
+- Left for after the sign-ins: real GPT and Grok runs (Grok's event format is read loosely until then), their connectors (MCP), then installing on the live relay.
+- Slack: code ready, waits for a Slack app. Dashboard: phase 8, parked.
+- Guardrails are checked per request (Jev, else words); inside a run, each worker is told the guardrails and to ask first.
