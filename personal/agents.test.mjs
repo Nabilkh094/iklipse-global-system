@@ -32,14 +32,15 @@ test("GPT runs codex exec, reads the prompt on stdin, resumes its own thread", (
   assert.equal(stdin, true);
   assert.deepEqual(fresh, ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-c", 'model_reasoning_effort="xhigh"', "-"]);
   const [again] = argsFor("gpt", { conv: { session: "t-9", model: "gpt-5.5" }, plan: true, system: "S", cwd: "/w" });
-  assert.deepEqual(again, ["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "gpt-5.5", "resume", "t-9", "-"]);
+  assert.deepEqual(again, ["exec", "resume", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="read-only"', "--model", "gpt-5.5", "t-9", "-"]);
 });
 
-test("Grok runs headless in the chat's folder, the prompt after -p", () => {
-  const [args, stdin] = argsFor("grok", { conv: { session: "g1" }, plan: false, system: "S", cwd: "/home/x/work" });
+test("Grok runs headless in the chat's folder, the prompt after -p, the instructions on a new session", () => {
+  const [args, stdin] = argsFor("grok", { conv: { session: "g1", effort: "max" }, plan: false, system: "S", cwd: "/home/x/work" });
   assert.equal(stdin, false);
-  assert.deepEqual(args, ["--output-format", "streaming-json", "--no-auto-update", "--no-alt-screen", "--cwd", "/home/x/work", "--always-approve", "--resume", "g1", "-p"]);
-  assert.ok(!argsFor("grok", { conv: {}, plan: true, system: "S", cwd: "/w" })[0].includes("--always-approve"));
+  assert.deepEqual(args, ["--output-format", "streaming-json", "--no-alt-screen", "--cwd", "/home/x/work", "--always-approve", "--reasoning-effort", "xhigh", "--resume", "g1", "-p"]);
+  const [fresh] = argsFor("grok", { conv: {}, plan: true, system: "S", cwd: "/w" });
+  assert.deepEqual(fresh, ["--output-format", "streaming-json", "--no-alt-screen", "--cwd", "/w", "--permission-mode", "plan", "--rules", "S", "-p"]);
 });
 
 test("Claude's answer, session, model, cost and steps", () => {

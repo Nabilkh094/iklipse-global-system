@@ -330,9 +330,8 @@ function main() {
       if (!existsSync(conf.bins[provider])) return done({ failed: `${PROVIDERS[provider].label} isn't installed on the server yet`, session: conv.session });
       if (provider !== "claude" && !PROVIDERS[provider].login(home))
         return done({ failed: `${PROVIDERS[provider].label} isn't signed in yet. On the server, as ${conf.user}: ${PROVIDERS[provider].signIn}`, session: conv.session });
-      // Claude gets the instructions as its system prompt; the others get them at the start of a new session.
-      const told = provider === "claude" || conv.session ? text : `[How to work here] ${SYSTEM}\n\n[The request]\n${text}`;
-      const prompt = plan && provider === "grok" ? `Only make a plan for this. Change nothing, run nothing that changes anything.\n\n${told}` : told;
+      // Claude and Grok get the instructions as part of their system prompt; codex has no such flag, so they open a new session.
+      const prompt = provider === "gpt" && !conv.session ? `[How to work here] ${SYSTEM}\n\n[The request]\n${text}` : text;
       const [args, onStdin] = argsFor(provider, { conv, plan, system: SYSTEM, cwd: conv.cwd });
       const child = spawn(conf.bins[provider], onStdin ? args : [...args, prompt], {
         cwd: conv.cwd,

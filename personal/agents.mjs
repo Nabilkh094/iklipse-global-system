@@ -52,28 +52,30 @@ export function argsFor(provider, { conv, plan, system, cwd }) {
     ];
   }
   if (provider === "gpt") {
+    // `codex exec resume` has its own options (codex-cli 0.166): no --sandbox there, so read-only goes through -c.
     const opts = [
       "--json",
       "--skip-git-repo-check",
-      ...(plan ? ["--sandbox", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"]),
+      ...(plan ? ["-c", 'sandbox_mode="read-only"'] : ["--dangerously-bypass-approvals-and-sandbox"]),
       ...(conv.model ? ["--model", conv.model] : []),
       ...(conv.effort ? ["-c", `model_reasoning_effort="${CODEX_EFFORT[conv.effort] ?? conv.effort}"`] : []),
     ];
     // "-": the prompt comes on stdin.
-    return [conv.session ? ["exec", ...opts, "resume", conv.session, "-"] : ["exec", ...opts, "-"], true];
+    return [conv.session ? ["exec", "resume", ...opts, conv.session, "-"] : ["exec", ...opts, "-"], true];
   }
   if (provider === "grok") {
+    // grok 1.0.70: -p single turn, --permission-mode, --reasoning-effort, --rules (appended to its system prompt).
     return [
       [
         "--output-format",
         "streaming-json",
-        "--no-auto-update",
         "--no-alt-screen",
         "--cwd",
         cwd,
-        ...(plan ? [] : ["--always-approve"]),
+        ...(plan ? ["--permission-mode", "plan"] : ["--always-approve"]),
         ...(conv.model ? ["--model", conv.model] : []),
-        ...(conv.session ? ["--resume", conv.session] : []),
+        ...(conv.effort ? ["--reasoning-effort", conv.effort === "max" ? "xhigh" : conv.effort] : []),
+        ...(conv.session ? ["--resume", conv.session] : ["--rules", system]),
         "-p",
       ],
       // Grok takes the prompt after -p, not on stdin.
