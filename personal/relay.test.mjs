@@ -48,8 +48,8 @@ test("the conversations, newest first, the current one marked", () => {
     c1: { id: "c1", n: 1, title: "Logo", cwd: "/home/claude-me/work", model: null, at: 1 },
     c2: { id: "c2", n: 2, title: "", cwd: "/home/claude-me/work/site", model: "opus", at: 2 },
   };
-  assert.equal(chatsList(convs, "c1", home), "   #2 (من غير اسم)\n     📁 ~/work/site · opus\n▶ #1 Logo\n     📁 ~/work");
-  assert.equal(chatsList({}, null, home), "مفيش محادثات لسه.");
+  assert.equal(chatsList(convs, "c1", home), "   #2 (untitled)\n     📁 ~/work/site · opus\n▶ #1 Logo\n     📁 ~/work");
+  assert.equal(chatsList({}, null, home), "No chats yet.");
 });
 
 test("Markdown as WhatsApp writes it: bold, headings, tables as lines, links, code left alone", () => {

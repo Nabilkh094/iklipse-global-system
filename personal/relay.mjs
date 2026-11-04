@@ -124,27 +124,27 @@ export function stepOf(name, input = {}) {
 /** The conversations, newest first, as /chats shows them. */
 export function chatsList(convs, cur, home) {
   const list = Object.values(convs).sort((a, b) => b.at - a.at);
-  if (!list.length) return "مفيش محادثات لسه.";
+  if (!list.length) return "No chats yet.";
   return list
     .slice(0, 15)
-    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(من غير اسم)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.model ? ` · ${c.model}` : ""}`)
+    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(untitled)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.model ? ` · ${c.model}` : ""}`)
     .join("\n");
 }
 
 const HELP = [
-  "*الأوامر*",
-  "/new [اسم] محادثة جديدة (/clear زيها)",
-  "/chats المحادثات",
-  "/switch رقم ترجع لمحادثة (/resume زيها)",
-  "/rename اسم تسمي المحادثة",
-  "/cd فولدر محادثة جديدة في فولدر (جوه ~/work أو مسار كامل في ~)",
-  "/model اسم الموديل (opus, sonnet, haiku, fable, أو الاسم الكامل). من غير اسم: الافتراضي",
+  "*Commands*",
+  "/new [name] a new chat (/clear does the same)",
+  "/chats your chats",
+  "/switch number go back to a chat (/resume does the same)",
+  "/rename name name this chat",
+  "/cd folder a new chat in a folder (inside ~/work, or a full path in ~)",
+  "/model name the model (opus, sonnet, haiku, fable, or the full name). No name: the default",
   "/effort low|medium|high|xhigh|max",
-  "/plan طلب يعمل خطة الأول من غير ما ينفذ، وبعدها قوله نفذ",
-  "/status إيه اللي شغال",
-  "/stop يوقف اللي شغال في المحادثة دي",
+  "/plan request makes a plan first without doing anything; then say go",
+  "/status what's running",
+  "/stop stops what's running in this chat",
   "",
-  "Reply على رد من Claude يكمل في نفس محادثته. فويس بيتكتب، صور وملفات بتتحفظ في inbox. أي /أمر تاني (skill) بيروح لـ Claude زي ما هو.",
+  "Reply to one of Claude's messages to go on in that chat. Voice notes are written out; photos and files are saved in the inbox. Any other /command (a skill) goes to Claude as it is.",
 ].join("\n");
 
 const SYSTEM = [
@@ -153,6 +153,7 @@ const SYSTEM = [
   "You can't ask questions with a picker here: ask in plain text and they answer in their next message.",
   "Files they send are saved under ~/work/inbox and named in their message: look at photos and documents with the Read tool.",
   "Voice notes come already written out.",
+  "Always write your replies in English, whatever language the message is in.",
   "Nothing you write to disk reaches them by itself: to give them a file, put it on their Google Drive (or GitHub for code) and send the link.",
   "Their code and folders live on GitHub (gh is signed in as them); images and videos go to their Google Drive.",
 ].join(" ");
@@ -194,7 +195,7 @@ function main() {
   } catch {}
   // The one conversation before there were several.
   if (st.session && !Object.keys(st.convs).length) {
-    st.convs.c1 = { id: "c1", n: 1, title: "الأولى", cwd: work, model: null, effort: null, session: st.session, at: Date.now() };
+    st.convs.c1 = { id: "c1", n: 1, title: "First", cwd: work, model: null, effort: null, session: st.session, at: Date.now() };
     st.cur = "c1";
     st.n = 1;
   }
@@ -267,8 +268,8 @@ function main() {
         "import sys",
         "from faster_whisper import WhisperModel",
         `m = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8", cpu_threads=2, download_root=${JSON.stringify(conf.whisperModels)}, local_files_only=True)`,
-        // Egyptian Arabic with English words in it: the hint keeps "skills" from coming out as Arabic letters.
-        `segs, info = m.transcribe(sys.argv[1], vad_filter=True, beam_size=5, initial_prompt=${JSON.stringify("عامية مصرية: Claude, skills, GitHub, Google Drive, code, VPS, chat.")})`,
+        // The language is found by Whisper; the hint keeps these words spelled as they are.
+        `segs, info = m.transcribe(sys.argv[1], vad_filter=True, beam_size=5, initial_prompt=${JSON.stringify("Claude, skills, GitHub, Google Drive, code, VPS, chat.")})`,
         "print(' '.join(s.text.strip() for s in segs))",
       ].join("\n");
       const child = spawn("nice", [conf.whisper, "-c", py, file], { env: { HF_HUB_OFFLINE: "1", PATH: "/usr/bin:/bin" } });
@@ -361,7 +362,7 @@ function main() {
         runs.delete(conv.id);
         if (result && typeof result.result === "string" && !result.is_error) return done({ text: result.result, session });
         const why = String(result?.result || err || "").trim().split("\n").slice(-3).join(" ").slice(0, 300);
-        done({ failed: signal ? `اتوقف (${run.stopped ? "/stop" : signal === "SIGTERM" ? "طوّل أكتر من اللازم" : signal})` : why || `خرج بكود ${code}`, session });
+        done({ failed: signal ? `stopped (${run.stopped ? "/stop" : signal === "SIGTERM" ? "it took too long" : signal})` : why || `exited with code ${code}`, session });
       });
       child.stdin.end(text);
     });
@@ -380,7 +381,7 @@ function main() {
       if ((told === 0 && secs >= 45) || (told > 0 && Date.now() - told >= 3 * MIN && run.step !== last)) {
         told = Date.now();
         last = run.step;
-        void say(`${tag()}⏳ شغال (${Math.round(secs / 60) || "<1"} د)${run.step ? `: ${run.step}` : ""}`, m.id, conv).catch(() => {});
+        void say(`${tag()}⏳ Working (${Math.round(secs / 60) || "<1"} min)${run.step ? `: ${run.step}` : ""}`, m.id, conv).catch(() => {});
       }
     }, 15 * SEC);
     void typing(true);
@@ -396,8 +397,8 @@ function main() {
     conv.session = r.session ?? conv.session;
     conv.at = Date.now();
     save();
-    const after = plan && !r.failed ? "\n\n(دي خطة بس. قول نفذ عشان يبدأ.)" : "";
-    await say(`${tag()}${r.failed ? `❌ مخلصش: ${r.failed}` : (r.text || "(مفيش رد)") + after}`, m.id, conv);
+    const after = plan && !r.failed ? "\n\n(This is only a plan. Say go to start.)" : "";
+    await say(`${tag()}${r.failed ? `❌ Didn't finish: ${r.failed}` : (r.text || "(no reply)") + after}`, m.id, conv);
   };
 
   /** What's waiting starts as soon as its conversation is free and fewer than the limit are running. */
@@ -411,7 +412,7 @@ function main() {
       handle(job)
         .catch(async (e) => {
           console.error("relay", e.message);
-          await say(`❌ حصلت مشكلة: ${e.message}`, job.m.id, job.conv).catch(() => {});
+          await say(`❌ Something went wrong: ${e.message}`, job.m.id, job.conv).catch(() => {});
         })
         .finally(() => {
           runs.delete(job.conv.id);
@@ -438,28 +439,28 @@ function main() {
         c.model = conv.model;
         c.effort = conv.effort;
         save();
-        return say(`✅ محادثة جديدة #${c.n}${arg ? ` ${arg}` : ""}\n📁 ${c.cwd.replace(home, "~")}`, m.id, c);
+        return say(`✅ New chat #${c.n}${arg ? ` ${arg}` : ""}\n📁 ${c.cwd.replace(home, "~")}`, m.id, c);
       }
       case "chats":
         return say(chatsList(st.convs, st.cur, home), m.id);
       case "switch":
       case "resume": {
         const c = Object.values(st.convs).find((x) => String(x.n) === arg.replace(/^#/, ""));
-        if (!c) return say(`مفيش محادثة #${arg}. /chats تعرضهم.`, m.id);
+        if (!c) return say(`No chat #${arg}. /chats lists them.`, m.id);
         st.cur = c.id;
         save();
         return say(`▶ #${c.n} ${c.title || ""}\n📁 ${c.cwd.replace(home, "~")}`, m.id, c);
       }
       case "rename":
-        if (!arg) return say("/rename الاسم", m.id);
+        if (!arg) return say("/rename name", m.id);
         conv.title = arg.slice(0, 60);
         save();
-        return say(`✅ #${conv.n} بقت: ${conv.title}`, m.id, conv);
+        return say(`✅ #${conv.n} is now: ${conv.title}`, m.id, conv);
       case "cd": {
         if (!arg) return say(`📁 ${conv.cwd.replace(home, "~")}`, m.id, conv);
         const p = inHome(arg);
-        if (!p) return say("الفولدر لازم يبقى جوه ~", m.id);
-        if (existsSync(p) && !statSync(p).isDirectory()) return say("ده ملف مش فولدر.", m.id);
+        if (!p) return say("The folder must be inside ~", m.id);
+        if (existsSync(p) && !statSync(p).isDirectory()) return say("That's a file, not a folder.", m.id);
         if (!existsSync(p)) {
           mkdirSync(p, { recursive: true });
           for (let d = p; d !== home && d.startsWith(home); d = resolve(d, "..")) mine(d);
@@ -468,19 +469,19 @@ function main() {
         c.model = conv.model;
         c.effort = conv.effort;
         save();
-        return say(`📁 ${p.replace(home, "~")}\n✅ محادثة جديدة #${c.n} في الفولدر ده`, m.id, c);
+        return say(`📁 ${p.replace(home, "~")}\n✅ New chat #${c.n} in this folder`, m.id, c);
       }
       case "model":
         conv.model = arg || null;
         save();
-        return say(`✅ الموديل في #${conv.n}: ${conv.model ?? "الافتراضي"}`, m.id, conv);
+        return say(`✅ Model in #${conv.n}: ${conv.model ?? "the default"}`, m.id, conv);
       case "effort":
         if (arg && !/^(low|medium|high|xhigh|max)$/.test(arg)) return say("/effort low | medium | high | xhigh | max", m.id);
         conv.effort = arg || null;
         save();
-        return say(`✅ الـ effort في #${conv.n}: ${conv.effort ?? "الافتراضي"}`, m.id, conv);
+        return say(`✅ Effort in #${conv.n}: ${conv.effort ?? "the default"}`, m.id, conv);
       case "plan":
-        if (!arg) return say("/plan وبعدها الطلب", m.id);
+        if (!arg) return say("/plan then your request", m.id);
         waiting.push({ conv, m, text: await words({ ...m, body: arg }), plan: true });
         return drain();
       case "status": {
@@ -489,9 +490,9 @@ function main() {
           .map((c) => {
             const r = runs.get(c.id);
             const q = waiting.filter((w) => w.conv.id === c.id).length;
-            return `#${c.n} ${c.title || ""}: ${r ? `شغال ${Math.round((Date.now() - r.started) / MIN)} د${r.step ? ` · ${r.step}` : ""}` : "مستني"}${q ? ` · ${q} في الطابور` : ""}`;
+            return `#${c.n} ${c.title || ""}: ${r ? `working ${Math.round((Date.now() - r.started) / MIN)} min${r.step ? ` · ${r.step}` : ""}` : "waiting"}${q ? ` · ${q} queued` : ""}`;
           });
-        return say(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${conv.model ?? "الموديل الافتراضي"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "مفيش حاجة شغالة."}`, m.id);
+        return say(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${conv.model ?? "the default model"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "Nothing running."}`, m.id);
       }
       case "stop": {
         const before = waiting.length;
@@ -502,7 +503,7 @@ function main() {
           r.child.kill("SIGTERM");
           return;
         }
-        return say(before !== waiting.length ? "✅ اتشال اللي كان مستني." : "مفيش حاجة شغالة في المحادثة دي.", m.id);
+        return say(before !== waiting.length ? "✅ Removed what was waiting." : "Nothing running in this chat.", m.id);
       }
     }
   };
@@ -534,7 +535,7 @@ function main() {
           drain();
         } catch (e) {
           console.error("relay", e.message);
-          await say(`❌ حصلت مشكلة: ${e.message}`, m.id).catch(() => {});
+          await say(`❌ Something went wrong: ${e.message}`, m.id).catch(() => {});
         }
       }
     } catch (e) {
