@@ -33,7 +33,7 @@ number. Separate from the bot and the brain: those stay on the API key.
 ```bash
 useradd -m -s /bin/bash claude-me && mkdir -p /home/claude-me/work && chown -R claude-me: /home/claude-me/work
 npm install -g @anthropic-ai/claude-code
-install -d -m 0755 /opt/claude-me && install -m 0644 personal/relay.mjs personal/agents.mjs /opt/claude-me/
+install -d -m 0755 /opt/claude-me && install -m 0644 personal/{relay,agents,chatlog,router,settings,slack,team,usage}.mjs /opt/claude-me/
 install -d -m 0700 /etc/claude-me
 grep ^WAHA_API_KEY= /opt/waha/.env | cut -d= -f2- > /etc/claude-me/waha.key && chmod 600 /etc/claude-me/waha.key
 printf 'GROUP=%s\nOWNERS=%s\n' '<group id>@g.us' '<lid>@lid,<number>@c.us' > /etc/claude-me/relay.conf
@@ -76,7 +76,36 @@ Jev (the router; it never answers by itself): the TypeSafe key in a root-only
 file the relay reads; it never reaches a worker.
 
 ```bash
-install -m 600 /dev/null /etc/claude-me/jev.key && nano /etc/claude-me/jev.key
+install -m 600 /dev/null /etc/claude-me/jev.key && read -rs K && printf '%s' "$K" > /etc/claude-me/jev.key && unset K && echo saved
+```
+
+## What the group does now (PLAN-normal-agents.md, phases 1–7)
+
+| File | What it is |
+|---|---|
+| `agents.mjs` | each worker's CLI, how its output is read, Jev's API |
+| `chatlog.mjs` | a chat's history, task state and approvals; the handoff when the model changes |
+| `settings.mjs` | defaults, instructions, language, tone, autonomy, guardrails, workflows, memory, limits |
+| `router.mjs` | Jev's decisions (route, guard, judge, compare/split), with Claude Haiku and plain rules behind it |
+| `team.mjs` | `/team`: compare or split, the Central Agent in charge |
+| `usage.mjs` | usage, faults, spend limits |
+| `slack.mjs` | Slack (Socket Mode) as a second way into the same chats |
+
+Tests: `node --test personal/*.test.mjs`. The whole relay against a fake WAHA
+and fake CLIs, on the server, apart from the real one: `node personal/e2e.server.mjs`.
+
+## Slack (optional)
+
+A Slack app with Socket Mode on, the bot scopes `chat:write`, `channels:history`
+(and `groups:history` for a private channel), the event `message.channels` (or
+`message.groups`), installed in the workspace and invited to the channel. Then,
+as root:
+
+```bash
+install -m 600 /dev/null /etc/claude-me/slack-bot.token && read -rs K && printf '%s' "$K" > /etc/claude-me/slack-bot.token && unset K
+install -m 600 /dev/null /etc/claude-me/slack-app.token && read -rs K && printf '%s' "$K" > /etc/claude-me/slack-app.token && unset K
+printf 'SLACK_CHANNEL=%s\nSLACK_OWNERS=%s\n' '<channel id>' '<Nabil member id>' >> /etc/claude-me/relay.conf
+systemctl restart claude-me-relay
 ```
 
 Logs: `journalctl -u claude-me-relay -f`.

@@ -1,27 +1,36 @@
-// The owner's own Claude, reached from one WhatsApp group.
+// Nabil's own agents, reached from one WhatsApp group (and one Slack channel).
 //
-// On the claude-vps server, next to WAHA: every 2 seconds it reads the group's
-// newest messages from WAHA (on the server itself, nothing opened to the
-// internet), takes the owner's only (anyone else in the group is ignored: it's
-// their subscription, for them), hands each to Claude Code, the unmodified
-// one, run as the claude-me user and signed in there by the owner themselves,
-// and sends what Claude says back to the group. The bot (the whatsapp-bot
-// function, PERSONAL_GROUP) stays out of this group.
+// On the server, next to WAHA: every 2 seconds it reads the group's newest
+// messages from WAHA (on the server itself, nothing opened to the internet),
+// takes the owner's only (anyone else in the group is ignored: these are his
+// subscriptions), and hands each to a worker: Claude Code, Codex (GPT) or
+// Grok Build, each the unmodified official CLI, run as the claude-me user and
+// signed in there by the owner himself. Jev (TypeSafe) makes the quick
+// decisions: who takes a request, is it sensitive, which team answer is best.
+// The bot (the whatsapp-bot function, PERSONAL_GROUP) stays out of this group.
 //
-// As on the desktop app: several conversations, each in its own folder, with
-// its own model and effort, two at a time; a reply to one of Claude's messages
-// goes on in that one's conversation; plan mode; what it's doing while it
-// works; voice notes written out (the server's Whisper), photos and files
-// saved where Claude works. /help lists the commands.
+// A chat is the relay's, not a worker's: it keeps the history, the task state
+// and what was approved, so a chat can move between models at any time and
+// the next one carries on (chatlog.mjs). Defaults, instructions, language,
+// tone, autonomy, guardrails, workflows, memory and spend limits are set from
+// the group (settings.mjs). Usage and faults are kept (usage.mjs). /help
+// lists the commands.
 //
-// Runs as root only to start Claude as claude-me; the WAHA key comes from
-// systemd (LoadCredential) and never reaches Claude.
+// Runs as root only to start the workers as claude-me; the WAHA, Jev and Slack
+// keys are root-only files read here and never reach a worker.
 
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chownSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { PROVIDERS, argsFor, footer, providerOf, readerFor } from "./agents.mjs";
+import { STATE_RULE, addTurn, approveLast, handoffFor, isApproval, markSeen, mergeState, splitState } from "./chatlog.mjs";
+import { isSensitive, judge, route, teamMode } from "./router.mjs";
+import { SETTINGS_COMMANDS, WORKERS, pickProvider, settingsCommand, systemFor, withDefaults, needsTaskType } from "./settings.mjs";
+import { slackClient } from "./slack.mjs";
+import { compare, split } from "./team.mjs";
+import { faultKind, faultsReport, limitState, record, usageReport } from "./usage.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -72,7 +81,11 @@ export function newFromOwner(messages, owners, seen) {
 }
 
 /** The relay's own commands; anything else (a skill's "/name" too) goes to Claude as it is. */
-const COMMANDS = new Set(["help", "new", "clear", "chats", "switch", "resume", "rename", "cd", "model", "effort", "plan", "status", "stop", "use", "logins"]);
+const COMMANDS = new Set([
+  ...["help", "new", "clear", "chats", "switch", "resume", "rename", "cd", "model", "effort", "plan", "status", "stop", "use", "logins"],
+  ...["undo", "auto", "dry", "team", "run", "approve", "task", "usage", "faults", "force"],
+  ...["instructions", "language", "tone", "autonomy", "guardrails", "workflows", "memory", "default", "limits", "central", "settings"],
+]);
 
 /** {name, arg} for one of the relay's commands, or null for a request. */
 export function commandOf(text) {
@@ -128,38 +141,51 @@ export function chatsList(convs, cur, home) {
   if (!list.length) return "No chats yet.";
   return list
     .slice(0, 15)
-    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(untitled)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.provider && c.provider !== "claude" ? ` · ${PROVIDERS[c.provider]?.label ?? c.provider}` : ""}${c.model ? ` · ${c.model}` : ""}`)
+    .map((c) => `${c.id === cur ? "▶" : "  "} #${c.n} ${c.title || "(untitled)"}\n     📁 ${c.cwd.startsWith(home) ? "~" + c.cwd.slice(home.length) : c.cwd}${c.auto ? " · auto" : c.provider && c.provider !== "claude" ? ` · ${PROVIDERS[c.provider]?.label ?? c.provider}` : ""}${c.model ? ` · ${c.model}` : ""}`)
     .join("\n");
 }
 
 const HELP = [
-  "*Commands*",
+  "*Chats*",
   "/new [name] a new chat (/clear does the same)",
-  "/chats your chats",
-  "/switch number go back to a chat (/resume does the same)",
-  "/rename name name this chat",
-  "/cd folder a new chat in a folder (inside ~/work, or a full path in ~)",
-  "/use claude|gpt|grok who answers in this chat",
-  "/logins which workers are signed in",
-  "/model name the model (for Claude: opus, sonnet, haiku, fable; or the full name). No name: the default",
-  "/effort low|medium|high|xhigh|max",
-  "/plan request makes a plan first without doing anything; then say go",
-  "/status what's running",
-  "/stop stops what's running in this chat",
+  "/chats your chats · /switch number go back to one (/resume)",
+  "/rename name · /cd folder a new chat in a folder",
+  "/status what's running · /stop stops this chat · /task this chat's task state",
   "",
-  "Reply to one of Claude's messages to go on in that chat. Voice notes are written out; photos and files are saved in the inbox. Any other /command (a skill) goes to Claude as it is.",
+  "*Who answers*",
+  "/use claude|gpt|grok switch this chat now; the history, instructions and task go with it",
+  "/auto Jev picks the worker for this chat (/auto off to stop)",
+  "/dry request shows who would take it and why, runs nothing",
+  "/team [compare|split] request several workers, the central agent in charge",
+  "/model name · /effort low|medium|high|xhigh|max for this chat's worker",
+  "/plan request a plan first, nothing done; then say go",
+  "/approve marks the last answer approved (go does too)",
+  "/logins who is signed in",
+  "",
+  "*Settings* (no code; /undo takes back the last change)",
+  "/settings all of them · /default · /central",
+  "/instructions · /language · /tone · /autonomy · /guardrails",
+  "/workflows · /run workflow request · /memory",
+  "",
+  "*Usage*",
+  "/usage · /faults · /limits · /force runs what a limit held",
+  "",
+  "Reply to an answer to go on in that chat. Voice notes are written out; photos and files are saved in the inbox. Any other /command (a skill) goes to the worker as it is.",
 ].join("\n");
 
-const SYSTEM = [
-  "Your owner reaches you from a WhatsApp group on their phone; every message is theirs.",
-  "What you answer is sent back to them as WhatsApp messages: readable on a phone, short paragraphs, plain lists, no tables.",
-  "You can't ask questions with a picker here: ask in plain text and they answer in their next message.",
-  "Files they send are saved under ~/work/inbox and named in their message: look at photos and documents with the Read tool.",
+/** What every worker is told, before Nabil's own settings (settings.systemFor). */
+const BASE = [
+  "Your owner, Nabil, reaches you from a WhatsApp group on his phone (or a Slack channel); every message is his.",
+  "What you answer is sent back to him as chat messages: readable on a phone, short paragraphs, plain lists, no tables.",
+  "You can't ask questions with a picker here: ask in plain text and he answers in his next message.",
+  "Files he sends are saved under ~/work/inbox and named in his message: open photos and documents from there.",
   "Voice notes come already written out.",
-  "Always write your replies in English, whatever language the message is in.",
-  "Nothing you write to disk reaches them by itself: to give them a file, put it on their Google Drive (or GitHub for code) and send the link.",
-  "Their code and folders live on GitHub (gh is signed in as them); images and videos go to their Google Drive.",
+  "Nothing you write to disk reaches him by itself: to give him a file, put it on his Google Drive (or GitHub for code) and send the link.",
+  "His code lives on GitHub; images and videos go to his Google Drive.",
+  STATE_RULE,
 ].join(" ");
+
+const LABELS = { claude: "Claude", gpt: "GPT", grok: "Grok" };
 
 // ------------------------------------------------------------------ the service --
 
@@ -175,11 +201,15 @@ function main() {
       gpt: process.env.CODEX_BIN || "/usr/local/bin/codex",
       grok: process.env.GROK_BIN || `/home/${process.env.CLAUDE_USER || "claude-me"}/.grok/bin/grok`,
     },
-    // Root-only, read by the relay itself; never handed to a worker.
+    // Root-only files read by the relay itself; never handed to a worker.
     jevKey: process.env.JEV_KEY_FILE || "/etc/claude-me/jev.key",
+    slackBot: process.env.SLACK_BOT_TOKEN_FILE || "/etc/claude-me/slack-bot.token",
+    slackApp: process.env.SLACK_APP_TOKEN_FILE || "/etc/claude-me/slack-app.token",
+    slackChannel: process.env.SLACK_CHANNEL || "",
+    slackOwners: new Set((process.env.SLACK_OWNERS || "").split(",").map((s) => s.trim()).filter(Boolean)),
     state: join(process.env.STATE_DIRECTORY || "/var/lib/claude-me-relay", "state.json"),
     maxRun: Number(process.env.MAX_RUN_MIN || 60) * MIN,
-    parallel: Number(process.env.MAX_PARALLEL || 2),
+    parallel: Number(process.env.MAX_PARALLEL || 3),
     whisper: process.env.WHISPER_PY || "/opt/whisper/venv/bin/python",
     whisperModels: process.env.WHISPER_MODELS || "/opt/whisper/models",
   };
@@ -190,18 +220,27 @@ function main() {
   }
   const uid = Number(execFileSync("id", ["-u", conf.user]).toString().trim());
   const gid = Number(execFileSync("id", ["-g", conf.user]).toString().trim());
-  const home = `/home/${conf.user}`;
+  const home = process.env.WORKER_HOME || `/home/${conf.user}`;
   const work = join(home, "work");
   const inbox = join(work, "inbox");
   const mine = (path) => chownSync(path, uid, gid);
+  const readKey = (file) => {
+    try {
+      return readFileSync(file, "utf8").trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const jevKey = () => readKey(conf.jevKey);
 
   // ------------------------------------------------------------ what's kept --
 
-  /** Where reading got to, the conversations, which one is current, and which conversation each of Claude's messages was. */
-  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {} };
+  /** Where reading got to, the chats, the current one, which chat each answer was; settings, usage. */
+  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {}, settings: null, settingsHistory: [], usage: [], warned: {}, held: null };
   try {
     st = { ...st, ...JSON.parse(readFileSync(conf.state, "utf8")) };
   } catch {}
+  st.settings = withDefaults(st.settings);
   // The one conversation before there were several.
   if (st.session && !Object.keys(st.convs).length) {
     st.convs.c1 = { id: "c1", n: 1, title: "First", cwd: work, model: null, effort: null, session: st.session, at: Date.now() };
@@ -209,25 +248,32 @@ function main() {
     st.n = 1;
   }
   delete st.session;
+  // Chats from before there were several workers: their one session was Claude's.
+  for (const c of Object.values(st.convs)) {
+    c.sessions ??= c.session ? { [c.provider ?? "claude"]: c.session } : {};
+    delete c.session;
+  }
   const save = () => {
     st.seen = st.seen.slice(-200);
     const sent = Object.entries(st.sent);
-    if (sent.length > 400) st.sent = Object.fromEntries(sent.slice(-400));
+    if (sent.length > 600) st.sent = Object.fromEntries(sent.slice(-600));
+    st.settingsHistory = st.settingsHistory.slice(-50);
     writeFileSync(`${conf.state}.new`, JSON.stringify(st));
     renameSync(`${conf.state}.new`, conf.state);
   };
 
   const newConv = (cwd = work, title = "") => {
     const n = ++st.n;
-    const c = { id: `c${n}`, n, title, cwd, model: null, effort: null, session: null, at: Date.now() };
+    const c = { id: `c${n}`, n, title, cwd, provider: null, auto: false, model: null, effort: null, sessions: {}, history: [], at: Date.now() };
     st.convs[c.id] = c;
     st.cur = c.id;
     save();
     return c;
   };
   const current = () => st.convs[st.cur] ?? newConv();
+  const label = (p) => LABELS[p] ?? p;
 
-  // ------------------------------------------------------------------- WAHA --
+  // ------------------------------------------------------- WAHA and Slack --
 
   const waha = async (method, path, body) => {
     const r = await fetch(conf.waha + path, {
@@ -239,21 +285,34 @@ function main() {
     if (!r.ok) throw new Error(`WAHA ${method} ${path.split("?")[0]}: ${r.status}`);
     return r;
   };
-  /** Sent to the group, as a reply to replyTo; each message remembered as the conversation's. */
-  const say = async (text, replyTo, conv) => {
+
+  const slackTokens = { bot: readKey(conf.slackBot), app: readKey(conf.slackApp) };
+  const slack =
+    slackTokens.bot && slackTokens.app && conf.slackChannel && conf.slackOwners.size
+      ? slackClient({ botToken: slackTokens.bot, appToken: slackTokens.app, channel: conf.slackChannel, owners: conf.slackOwners, onMessage: (m) => take([m]) })
+      : null;
+
+  /** Sent where the message came from (WhatsApp, or Slack in its thread); each piece remembered as the chat's. */
+  const say = async (text, ref, conv, via = "wa") => {
     for (const [i, p] of pieces(whatsappText(text)).entries()) {
-      const r = await waha("POST", "/api/sendText", { session: conf.session, chatId: conf.group, text: p, linkPreview: false, ...(i === 0 && replyTo ? { reply_to: replyTo } : {}) });
+      if (via === "slack" && slack) {
+        const ts = await slack.say(p, ref);
+        if (conv && ts) st.sent[ts] = conv.id;
+        continue;
+      }
+      const r = await waha("POST", "/api/sendText", { session: conf.session, chatId: conf.group, text: p, linkPreview: false, ...(i === 0 && ref ? { reply_to: ref } : {}) });
       const sent = await r.json().catch(() => null);
       const id = shortId(sent?.id ?? sent?.key?.id ?? "");
       if (conv && id) st.sent[id] = conv.id;
     }
+    if (conv && via === "slack" && ref) st.sent[ref] = conv.id;
     if (conv) save();
   };
-  const typing = (on) => waha("POST", on ? "/api/startTyping" : "/api/stopTyping", { session: conf.session, chatId: conf.group }).catch(() => {});
+  const typing = (on, via) => (via === "slack" ? Promise.resolve() : waha("POST", on ? "/api/startTyping" : "/api/stopTyping", { session: conf.session, chatId: conf.group }).catch(() => {}));
 
   // ------------------------------------------------------- what they send --
 
-  /** A file they sent, saved where Claude works: its path, or null. */
+  /** A file they sent, saved where the workers work: its path, or null. */
   const keep = async (m) => {
     const url = m.media?.url;
     if (!url) return null;
@@ -278,7 +337,7 @@ function main() {
         "from faster_whisper import WhisperModel",
         `m = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8", cpu_threads=2, download_root=${JSON.stringify(conf.whisperModels)}, local_files_only=True)`,
         // The language is found by Whisper; the hint keeps these words spelled as they are.
-        `segs, info = m.transcribe(sys.argv[1], vad_filter=True, beam_size=5, initial_prompt=${JSON.stringify("Claude, skills, GitHub, Google Drive, code, VPS, chat.")})`,
+        `segs, info = m.transcribe(sys.argv[1], vad_filter=True, beam_size=5, initial_prompt=${JSON.stringify("Claude, GPT, Grok, Jev, skills, GitHub, Google Drive, code, VPS, chat.")})`,
         "print(' '.join(s.text.strip() for s in segs))",
       ].join("\n");
       const child = spawn("nice", [conf.whisper, "-c", py, file], { env: { HF_HUB_OFFLINE: "1", PATH: "/usr/bin:/bin" } });
@@ -288,10 +347,10 @@ function main() {
       child.on("close", (code) => done(code === 0 ? out.trim() : null));
     });
 
-  /** Their message as Claude gets it: the words, what it replies to, a voice note written out, a file's path. */
+  /** Their message as a worker gets it: the words, what it replies to, a voice note written out, a file's path. */
   const words = async (m) => {
     let text = String(m.body ?? "").trim();
-    if (m.hasMedia) {
+    if (m.hasMedia && m.via !== "slack") {
       const full = await waha("GET", `/api/${conf.session}/chats/${encodeURIComponent(conf.group)}/messages?limit=30&downloadMedia=true`)
         .then((r) => r.json())
         .then((all) => all.find((x) => x.id === m.id));
@@ -299,7 +358,7 @@ function main() {
       const type = String(full?.media?.mimetype ?? "");
       if (file && /^audio\//.test(type)) {
         const said = await transcribe(file);
-        text = said ? `[voice note, written out by machine: a word may be wrong, read it for what they mean] ${said}${text ? `\n${text}` : ""}` :`${text}\n[a voice note that couldn't be written out, saved at ${file}]`;
+        text = said ? `[voice note, written out by machine: a word may be wrong, read it for what they mean] ${said}${text ? `\n${text}` : ""}` : `${text}\n[a voice note that couldn't be written out, saved at ${file}]`;
       } else if (file) {
         text += `\n[they sent ${/^image\//.test(type) ? "a photo" : "a file"}, saved at ${file}${type ? ` (${type})` : ""}]`;
       } else text += "\n[they sent a file that couldn't be saved]";
@@ -308,33 +367,46 @@ function main() {
     return text.trim();
   };
 
-  // ----------------------------------------------------------------- Claude --
+  // ---------------------------------------------------------------- workers --
 
-  const runs = new Map(); // conversation id -> {child, started, step}
-  const waiting = []; // [{conv, m, text, plan}]
+  const active = new Set(); // chats being handled now
+  const runs = new Map(); // run id (the chat's id, or chat:worker for team runs) -> {child, started, step}
+  const waiting = []; // [{conv, m, text, plan, team, force}]
 
   /** Which workers are signed in on the server, and whether Jev has its key. */
   const logins = () => ({
     ...Object.fromEntries(Object.entries(PROVIDERS).map(([p, d]) => [p, d.login(home) && existsSync(conf.bins[p])])),
-    jev: existsSync(conf.jevKey),
+    jev: Boolean(jevKey()),
   });
+  /** Workers that can take a request now: signed in, not paused, not over a limit. */
+  const available = () => {
+    const l = logins();
+    return WORKERS.filter((p) => l[p] && !["paused", "over"].includes(limitState(st.settings, st.usage, p).level));
+  };
 
   /**
-   * One request to the chat's worker: its answer, or why there's none. The
-   * latest step is kept on the run, for the progress line.
+   * One run of a worker: its answer, or why there's none.
+   * holder: {id, cwd, sessions, model, effort} (a chat, or a team part); the run is kept under runId.
    */
-  const ask = (conv, text, plan) =>
+  const ask = (holder, provider, prompt, { plan = false, runId = holder.id, model = holder.model, effort = holder.effort, fresh = false } = {}) =>
     new Promise((done) => {
-      const provider = conv.provider ?? "claude";
       const started = Date.now();
-      if (!existsSync(conf.bins[provider])) return done({ failed: `${PROVIDERS[provider].label} isn't installed on the server yet`, session: conv.session });
-      if (provider !== "claude" && !PROVIDERS[provider].login(home))
-        return done({ failed: `${PROVIDERS[provider].label} isn't signed in yet. On the server, as ${conf.user}: ${PROVIDERS[provider].signIn}`, session: conv.session });
-      // Claude and Grok get the instructions as part of their system prompt; codex has no such flag, so they open a new session.
-      const prompt = provider === "gpt" && !conv.session ? `[How to work here] ${SYSTEM}\n\n[The request]\n${text}` : text;
-      const [args, onStdin] = argsFor(provider, { conv, plan, system: SYSTEM, cwd: conv.cwd });
-      const child = spawn(conf.bins[provider], onStdin ? args : [...args, prompt], {
-        cwd: conv.cwd,
+      const finish = (r) => {
+        record(st.usage, { provider, ok: Boolean(r.text), cost: r.cost, usage: r.usage, error: r.failed });
+        save();
+        done(r);
+      };
+      if (!existsSync(conf.bins[provider])) return finish({ failed: `${label(provider)} isn't installed on the server yet` });
+      if (provider !== "claude" && !PROVIDERS[provider].login(home)) return finish({ failed: `${label(provider)} isn't signed in yet. On the server: sudo -iu ${conf.user} ${PROVIDERS[provider].signIn}` });
+      const session = fresh ? null : (holder.sessions?.[provider] ?? null);
+      const system = systemFor(st.settings, provider, BASE);
+      // Codex has no system-prompt flag: the instructions open its session, and come again when they changed.
+      const sysv = createHash("sha1").update(system).digest("hex").slice(0, 12);
+      const tell = provider === "gpt" && (!session || holder.sysv?.gpt !== sysv);
+      const text = tell ? `[How to work here]\n${system}\n\n[The request]\n${prompt}` : prompt;
+      const [args, onStdin] = argsFor(provider, { conv: { model, effort, session }, plan, system, cwd: holder.cwd });
+      const child = spawn(conf.bins[provider], onStdin ? args : [...args, text], {
+        cwd: holder.cwd,
         uid,
         gid,
         env: { HOME: home, USER: conf.user, LOGNAME: conf.user, LANG: "C.UTF-8", PATH: `${home}/.local/bin:${home}/.grok/bin:/usr/local/bin:/usr/bin:/bin` },
@@ -344,14 +416,15 @@ function main() {
       const run = {
         child,
         started,
+        provider,
         get step() {
           return reader.step;
         },
       };
-      runs.set(conv.id, run);
+      runs.set(runId, run);
       let buf = "";
       let err = "";
-      const take = (line) => {
+      const takeLine = (line) => {
         if (!line) return;
         try {
           reader.feed(JSON.parse(line));
@@ -361,7 +434,7 @@ function main() {
         buf += d;
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
-          take(buf.slice(0, nl).trim());
+          takeLine(buf.slice(0, nl).trim());
           buf = buf.slice(nl + 1);
         }
       });
@@ -370,68 +443,202 @@ function main() {
       const timer = setTimeout(() => child.kill("SIGTERM"), conf.maxRun);
       child.on("close", (code, signal) => {
         clearTimeout(timer);
-        runs.delete(conv.id);
-        take(buf.trim());
+        if (runs.get(runId) === run) runs.delete(runId);
+        takeLine(buf.trim());
         const r = reader.result();
-        const session = r.session ?? conv.session;
-        const foot = footer({ provider, model: r.model ?? conv.model, effort: conv.effort, ms: Date.now() - started, cost: r.cost, usage: r.usage });
-        if (r.text && !signal) return done({ text: r.text, session, foot });
+        const out = { session: r.session ?? session, model: r.model ?? model, cost: r.cost, usage: r.usage, provider, ms: Date.now() - started };
+        if (tell && r.text) holder.sysv = { ...(holder.sysv ?? {}), gpt: sysv };
+        if (r.text && !signal) return finish({ ...out, text: r.text });
         const why = String(r.error || err || "").trim().split("\n").slice(-3).join(" ").slice(0, 300);
-        done({ failed: signal ? `stopped (${run.stopped ? "/stop" : signal === "SIGTERM" ? "it took too long" : signal})` : why || `exited with code ${code}`, session, foot });
+        finish({ ...out, failed: signal ? `stopped (${run.stopped ? "/stop" : signal === "SIGTERM" ? "it took too long" : signal})` : why || `exited with code ${code}` });
       });
-      child.stdin.end(onStdin ? prompt : undefined);
+      child.stdin.end(onStdin ? text : undefined);
     });
 
-  /** A request in its conversation, start to answer: typing, a word on what it's doing when it's long, the answer. */
-  const handle = async ({ conv, m, text, plan }) => {
+  /** A quick read-only question to Claude (Haiku): the router's fallback. */
+  const askClaude = async (prompt) => {
+    const r = await ask({ id: `q${Date.now()}`, cwd: work, sessions: {} }, "claude", prompt, { plan: true, model: "haiku", effort: null, fresh: true });
+    if (!r.text) throw new Error(r.failed);
+    return r.text;
+  };
+
+  /** The Central Agent: merges and splits for team mode, read-only. */
+  const centralAgent = (holder) => async (prompt) => {
+    const { provider, model } = st.settings.central;
+    return ask({ ...holder, sessions: {} }, logins()[provider] ? provider : "claude", prompt, { plan: true, model, runId: `${holder.id}:central`, fresh: true });
+  };
+
+  /** Which worker takes this request in this chat, and how it was picked. */
+  const choose = async (conv, text, m) => {
+    const avail = available();
+    if (conv.provider) return { provider: conv.provider, why: "this chat" };
+    const fallback = avail.includes(st.settings.defaults.global) ? st.settings.defaults.global : (avail[0] ?? "claude");
+    if (conv.auto) {
+      if (conv.autoPick && avail.includes(conv.autoPick)) return { provider: conv.autoPick, why: "auto (kept for this chat)" };
+      const r = await route({ text, available: avail.length ? avail : ["claude"], jevKey: jevKey(), askClaude, fallback });
+      conv.autoPick = r.provider;
+      if (!conv.effort) conv.autoEffort = r.effort;
+      return { provider: r.provider, why: `auto (${r.by}: ${r.taskType}, effort ${r.effort})` };
+    }
+    let taskType = null;
+    if (needsTaskType(st.settings)) taskType = (await route({ text, available: avail.length ? avail : ["claude"], jevKey: jevKey(), askClaude, fallback })).taskType;
+    const pick = pickProvider({ chat: null, workflow: conv.workflow, taskType, user: m?.from ?? null, settings: st.settings });
+    return pick;
+  };
+
+  /** A request in its chat, start to answer: typing, a word on what it's doing when it's long, the answer. */
+  const handle = async (job) => {
+    const { conv, m } = job;
+    const via = m.via ?? "wa";
+    const ref = m.ref ?? m.id;
     const tag = () => (st.cur !== conv.id ? `[#${conv.n} ${conv.title || ""}]\n`.replace(" ]", "]") : "");
+    const tell = (text) => say(`${tag()}${text}`, ref, conv, via).catch(() => {});
     let told = 0;
     let last = null;
     const tick = setInterval(() => {
-      void typing(true);
-      const run = runs.get(conv.id);
-      if (!run) return;
+      void typing(true, via);
+      const live = [...runs.entries()].filter(([id]) => id === conv.id || id.startsWith(`${conv.id}:`));
+      if (!live.length) return;
+      const [, run] = live[0];
       const secs = (Date.now() - run.started) / SEC;
+      const step = live.map(([, r]) => `${label(r.provider)}${r.step ? `: ${r.step}` : ""}`).join(" · ");
       // A word at 45 seconds, then every 3 minutes when the step changed.
-      if ((told === 0 && secs >= 45) || (told > 0 && Date.now() - told >= 3 * MIN && run.step !== last)) {
+      if ((told === 0 && secs >= 45) || (told > 0 && Date.now() - told >= 3 * MIN && step !== last)) {
         told = Date.now();
-        last = run.step;
-        void say(`${tag()}⏳ Working (${Math.round(secs / 60) || "<1"} min)${run.step ? `: ${run.step}` : ""}`, m.id, conv).catch(() => {});
+        last = step;
+        void tell(`⏳ Working (${Math.round(secs / 60) || "<1"} min): ${step}`);
       }
     }, 15 * SEC);
-    void typing(true);
-    if (!conv.title) conv.title = text.replace(/^\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").slice(0, 40);
-    let r = await ask(conv, text, plan);
-    // A conversation Claude no longer has: a new one, in the same folder.
-    if (r.failed && conv.session && /no conversation found|session not found|no session/i.test(r.failed)) {
-      conv.session = null;
-      r = await ask(conv, text, plan);
+    void typing(true, via);
+    try {
+      if (!conv.title) conv.title = job.text.replace(/^\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").slice(0, 40);
+      if (job.team) return await runTeam(job, tell);
+
+      // "go" after a plan: approved, and done for real.
+      let { text, plan } = job;
+      let after = "";
+      if (!plan && conv.awaitingGo && isApproval(text)) {
+        approveLast(conv);
+        conv.awaitingGo = false;
+        if (conv.auto) conv.autoPick = null; // plan -> build: Jev may pick again
+        text = `${text}\n[Nabil approved the plan above: do it now.]`;
+      }
+      const pick = await choose(conv, text, m);
+      let provider = pick.provider;
+      const lim = limitState(st.settings, st.usage, provider);
+      if (!job.force && (lim.level === "over" || lim.level === "paused")) {
+        st.held = { conv: conv.id, text: job.text, plan: job.plan, m: { id: m.id, via, ref } };
+        save();
+        return await tell(`⏸ ${label(provider)} is ${lim.level === "paused" ? "paused" : `over its ${lim.period} limit`}. /force runs it anyway, or /use another worker.`);
+      }
+      // Guardrails: autonomy decides when a request becomes a plan first.
+      if (!plan && !job.force && !job.approved && !/approved the plan/.test(text)) {
+        const a = st.settings.autonomy;
+        const sensitive = a === "do-and-report" ? false : a === "ask-all" ? true : await isSensitive({ text, guardrails: st.settings.guardrails, jevKey: jevKey() });
+        if (sensitive) {
+          plan = true;
+          after = a === "ask-all" ? "\n\n(Autonomy is ask-all: this is only a plan. Say go to start.)" : "\n\n⚠️ This touches the guardrails, so this is only a plan. Say go to do it.";
+        }
+      }
+      const effort = conv.effort ?? conv.autoEffort ?? null;
+      const handoff = handoffFor(conv, provider, LABELS);
+      addTurn(conv, "nabil", job.text);
+      let r = await ask(conv, provider, handoff ? `${handoff}\n\n${text}` : text, { plan, effort });
+      // A conversation the worker no longer has: the same request in a new one, with the chat's record.
+      if (r.failed && conv.sessions[provider] && /no conversation found|session not found|no session|not found/i.test(r.failed)) {
+        delete conv.sessions[provider];
+        delete conv.seenBy?.[provider];
+        const again = handoffFor(conv, provider, LABELS);
+        r = await ask(conv, provider, again ? `${again}\n\n${text}` : text, { plan, effort });
+      }
+      // A worker that fails for a reason another one wouldn't: in auto, the next one takes it.
+      if (r.failed && conv.auto && ["signed out", "limit reached", "down", "not installed"].includes(faultKind(r.failed))) {
+        const next = available().find((p) => p !== provider);
+        if (next) {
+          await tell(`⚠️ ${label(provider)} failed (${faultKind(r.failed)}): ${label(next)} takes it.`);
+          conv.autoPick = next;
+          provider = next;
+          const h = handoffFor(conv, provider, LABELS);
+          r = await ask(conv, provider, h ? `${h}\n\n${text}` : text, { plan, effort });
+        }
+      }
+      conv.at = Date.now();
+      const foot = `\n\n${footer({ provider, model: r.model, effort, ms: r.ms ?? 0, cost: r.cost, usage: r.usage })}${conv.auto || !["this chat", "the default"].includes(pick.why) ? `\n_picked by: ${pick.why}_` : ""}`;
+      if (r.failed) {
+        save();
+        return await tell(`❌ ${label(provider)} didn't finish (${faultKind(r.failed)}): ${r.failed}${foot}`);
+      }
+      conv.sessions[provider] = r.session;
+      const { text: answer, state } = splitState(r.text);
+      mergeState(conv, state);
+      addTurn(conv, provider, answer);
+      markSeen(conv, provider);
+      if (plan) conv.awaitingGo = true;
+      save();
+      if (plan && !after) after = "\n\n(This is only a plan. Say go to start.)";
+      await tell(`${answer || "(no reply)"}${after}${foot}`);
+      // A limit getting close: once per period.
+      const now = limitState(st.settings, st.usage, provider);
+      const wk = `${provider}:${now.period}:${new Date().toISOString().slice(0, now.period === "day" ? 10 : 8)}`;
+      if (now.level === "warn" && !st.warned[wk]) {
+        st.warned[wk] = true;
+        save();
+        await tell(`⚠️ ${label(provider)} has used ${Math.round(now.share * 100)}% of its ${now.period} limit.`);
+      }
+    } finally {
+      clearInterval(tick);
+      void typing(false, via);
     }
-    clearInterval(tick);
-    void typing(false);
-    conv.session = r.session ?? conv.session;
-    conv.at = Date.now();
-    save();
-    const after = plan && !r.failed ? "\n\n(This is only a plan. Say go to start.)" : "";
-    const foot = r.foot ? `\n\n${r.foot}` : "";
-    await say(`${tag()}${r.failed ? `❌ Didn't finish: ${r.failed}` : (r.text || "(no reply)") + after}${foot}`, m.id, conv);
   };
 
-  /** What's waiting starts as soon as its conversation is free and fewer than the limit are running. */
+  /** /team: several workers, the Central Agent in charge. */
+  const runTeam = async (job, tell) => {
+    const { conv } = job;
+    const workers = available();
+    if (workers.length < 2) return tell(`👥 Team needs at least two signed-in workers; now: ${workers.map(label).join(", ") || "none"}. /logins shows who is missing.`);
+    const started = Date.now();
+    const context = (() => {
+      const h = handoffFor({ ...conv, sessions: {} }, "team", LABELS);
+      return h ? `${h}\n\n` : "";
+    })();
+    addTurn(conv, "nabil", job.text);
+    const run = (w, prompt) => ask({ ...conv, sessions: {}, model: null }, w, prompt, { runId: `${conv.id}:${w}:${Date.now()}`, fresh: true, effort: conv.effort });
+    const central = centralAgent(conv);
+    const jk = jevKey();
+    let mode = job.team === "auto" ? await teamMode({ task: job.text, jevKey: jk }) : job.team;
+    const common = { task: job.text, context, workers, run, central, progress: (l) => void tell(l), labels: LABELS };
+    let res = mode === "split" ? await split(common) : await compare({ ...common, judge: (answers) => judge({ task: job.text, answers, jevKey: jk }) });
+    if (res.fallback === "compare") {
+      mode = "compare";
+      res = await compare({ ...common, judge: (answers) => judge({ task: job.text, answers, jevKey: jk }) });
+    }
+    if (!res.text) return tell(`❌ Team didn't finish: ${res.failed}`);
+    const { text: answer, state } = splitState(res.text);
+    mergeState(conv, state);
+    addTurn(conv, "team", answer);
+    conv.at = Date.now();
+    save();
+    const secs = Math.round((Date.now() - started) / SEC);
+    const scores = res.scores ? ` · Jev scores: ${Object.entries(res.scores).map(([p, s]) => `${label(p)} ${s.toFixed(1)}`).join(", ")}` : "";
+    await tell(`${answer}${res.note ? `\n\n(${res.note})` : ""}\n\n_Team (${mode}): ${[...new Set((res.results ?? []).map((x) => x.provider ?? x.worker))].map(label).join(", ") || workers.map(label).join(", ")} · central ${label(st.settings.central.provider)} · ${secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`}${scores}_`);
+  };
+
+  /** What's waiting starts as soon as its chat is free and fewer than the limit are running. */
+  const busy = (convId) => active.has(convId) || [...runs.keys()].some((id) => id === convId || id.startsWith(`${convId}:`));
   const drain = () => {
-    for (let i = 0; i < waiting.length && runs.size < conf.parallel; i++) {
+    for (let i = 0; i < waiting.length && active.size < conf.parallel; i++) {
       const job = waiting[i];
-      if (runs.has(job.conv.id) || waiting.slice(0, i).some((w) => w.conv.id === job.conv.id)) continue;
+      if (busy(job.conv.id) || waiting.slice(0, i).some((w) => w.conv.id === job.conv.id)) continue;
       waiting.splice(i--, 1);
       // Taken now, so drain doesn't start it twice before ask has.
-      runs.set(job.conv.id, { child: null, started: Date.now(), step: null });
+      active.add(job.conv.id);
       handle(job)
         .catch(async (e) => {
           console.error("relay", e.message);
-          await say(`❌ Something went wrong: ${e.message}`, job.m.id, job.conv).catch(() => {});
+          await say(`❌ Something went wrong: ${e.message}`, job.m.ref ?? job.m.id, job.conv, job.m.via).catch(() => {});
         })
         .finally(() => {
-          runs.delete(job.conv.id);
+          active.delete(job.conv.id);
           drain();
         });
     }
@@ -445,109 +652,225 @@ function main() {
   };
 
   const command = async ({ name, arg }, m) => {
+    const via = m.via ?? "wa";
+    const ref = m.ref ?? m.id;
+    const reply = (text, conv) => say(text, ref, conv, via);
     const conv = current();
+    const who = (c) => (c.auto ? `auto${c.autoPick ? ` (now ${label(c.autoPick)})` : ""}` : label(c.provider ?? pickProvider({ workflow: c.workflow, user: m.from, settings: st.settings }).provider));
+    if (SETTINGS_COMMANDS.has(name)) {
+      const r = settingsCommand(name, arg, st.settings, { user: m.from ?? null });
+      if (r.next) {
+        st.settingsHistory.push({ at: Date.now(), what: r.what, before: JSON.stringify(st.settings) });
+        st.settings = r.next;
+        save();
+      }
+      return reply(r.reply);
+    }
     switch (name) {
       case "help":
-        return say(HELP, m.id);
+        return reply(HELP);
+      case "undo": {
+        const last = st.settingsHistory.pop();
+        if (!last) return reply("Nothing to undo.");
+        st.settings = withDefaults(JSON.parse(last.before));
+        save();
+        return reply(`↩️ Took back the last change to ${last.what}.`);
+      }
       case "new":
       case "clear": {
         const c = newConv(conv.cwd, arg);
-        c.provider = conv.provider;
-        c.model = conv.model;
-        c.effort = conv.effort;
+        Object.assign(c, { provider: conv.provider, auto: conv.auto, model: conv.model, effort: conv.effort });
         save();
-        return say(`✅ New chat #${c.n}${arg ? ` ${arg}` : ""}\n📁 ${c.cwd.replace(home, "~")}`, m.id, c);
+        return reply(`✅ New chat #${c.n}${arg ? ` ${arg}` : ""} · ${who(c)}\n📁 ${c.cwd.replace(home, "~")}`, c);
       }
       case "chats":
-        return say(chatsList(st.convs, st.cur, home), m.id);
+        return reply(chatsList(st.convs, st.cur, home));
       case "switch":
       case "resume": {
         const c = Object.values(st.convs).find((x) => String(x.n) === arg.replace(/^#/, ""));
-        if (!c) return say(`No chat #${arg}. /chats lists them.`, m.id);
+        if (!c) return reply(`No chat #${arg}. /chats lists them.`);
         st.cur = c.id;
         save();
-        return say(`▶ #${c.n} ${c.title || ""}\n📁 ${c.cwd.replace(home, "~")}`, m.id, c);
+        return reply(`▶ #${c.n} ${c.title || ""} · ${who(c)}\n📁 ${c.cwd.replace(home, "~")}`, c);
       }
       case "rename":
-        if (!arg) return say("/rename name", m.id);
+        if (!arg) return reply("/rename name");
         conv.title = arg.slice(0, 60);
         save();
-        return say(`✅ #${conv.n} is now: ${conv.title}`, m.id, conv);
+        return reply(`✅ #${conv.n} is now: ${conv.title}`, conv);
       case "cd": {
-        if (!arg) return say(`📁 ${conv.cwd.replace(home, "~")}`, m.id, conv);
+        if (!arg) return reply(`📁 ${conv.cwd.replace(home, "~")}`, conv);
         const p = inHome(arg);
-        if (!p) return say("The folder must be inside ~", m.id);
-        if (existsSync(p) && !statSync(p).isDirectory()) return say("That's a file, not a folder.", m.id);
+        if (!p) return reply("The folder must be inside ~");
+        if (existsSync(p) && !statSync(p).isDirectory()) return reply("That's a file, not a folder.");
         if (!existsSync(p)) {
           mkdirSync(p, { recursive: true });
           for (let d = p; d !== home && d.startsWith(home); d = resolve(d, "..")) mine(d);
         }
         const c = newConv(p);
-        c.provider = conv.provider;
-        c.model = conv.model;
-        c.effort = conv.effort;
+        Object.assign(c, { provider: conv.provider, auto: conv.auto, model: conv.model, effort: conv.effort });
         save();
-        return say(`📁 ${p.replace(home, "~")}\n✅ New chat #${c.n} in this folder`, m.id, c);
+        return reply(`📁 ${p.replace(home, "~")}\n✅ New chat #${c.n} in this folder`, c);
+      }
+      case "use": {
+        const p = providerOf(arg);
+        if (!p) return reply("/use claude | gpt | grok");
+        if (p === conv.provider && !conv.auto) return reply(`#${conv.n} already uses ${label(p)}.`, conv);
+        const from = conv.auto ? conv.autoPick : conv.provider;
+        Object.assign(conv, { provider: p, auto: false, autoPick: null, autoEffort: null, model: null });
+        save();
+        const ok = logins()[p];
+        const carried = (conv.history ?? []).length ? ` It takes over with this chat's history, instructions and task${from ? ` from ${label(from)}` : ""}.` : "";
+        return reply(`✅ #${conv.n} now uses ${label(p)}.${carried}${ok ? "" : `\n⚠️ ${label(p)} isn't signed in yet: sudo -iu ${conf.user} ${PROVIDERS[p].signIn}`}`, conv);
+      }
+      case "auto": {
+        if (arg === "off") {
+          Object.assign(conv, { provider: conv.autoPick ?? null, auto: false, autoPick: null, autoEffort: null });
+          save();
+          return reply(`✅ #${conv.n}: auto off · ${who(conv)}`, conv);
+        }
+        Object.assign(conv, { provider: null, auto: true, autoPick: null, autoEffort: null });
+        save();
+        return reply(`✅ #${conv.n}: ${jevKey() ? "Jev" : "Claude Haiku (no Jev key yet)"} picks the worker, kept for the chat until a plan gets its go.`, conv);
+      }
+      case "dry": {
+        if (!arg) return reply("/dry request");
+        const avail = available();
+        const r = await route({ text: arg, available: avail.length ? avail : ["claude"], jevKey: jevKey(), askClaude, fallback: st.settings.defaults.global });
+        const pick = conv.auto ? r.provider : pickProvider({ chat: conv.provider, workflow: conv.workflow, taskType: r.taskType, user: m.from, settings: st.settings }).provider;
+        return reply(`🧪 ${label(pick)} would take it · ${r.taskType} · effort ${r.effort}${r.sensitive ? " · sensitive: a plan first" : ""}\nDecided by ${r.by === "jev" ? "Jev" : r.by === "claude" ? "Claude Haiku" : "the rules"}; nothing was run.${avail.length ? "" : "\n⚠️ No worker is signed in and free."}`);
+      }
+      case "team": {
+        const mm = /^(compare|split)\b\s*([\s\S]*)$/i.exec(arg);
+        const task = mm ? mm[2].trim() : arg;
+        if (!task) return reply("/team [compare|split] request");
+        waiting.push({ conv, m, text: await words({ ...m, body: task }), team: mm ? mm[1].toLowerCase() : "auto" });
+        return drain();
+      }
+      case "run": {
+        const mm = /^([\w-]+)\s+([\s\S]+)$/.exec(arg);
+        const wf = mm && st.settings.workflows[mm[1].toLowerCase()];
+        if (!wf) return reply(`/run workflow request · workflows: ${Object.keys(st.settings.workflows).join(", ") || "none yet (/workflows add)"}`);
+        const c = newConv(conv.cwd, `${mm[1].toLowerCase()}: ${mm[2].slice(0, 30)}`);
+        Object.assign(c, { workflow: mm[1].toLowerCase(), effort: conv.effort });
+        save();
+        const text = `[Workflow "${mm[1].toLowerCase()}": go through these steps in order, saying which step you're on: ${wf.steps.map((s, i) => `${i + 1}. ${s}`).join(" ")}]\n${await words({ ...m, body: mm[2] })}`;
+        waiting.push({ conv: c, m, text, plan: false });
+        await reply(`▶ #${c.n} workflow ${mm[1].toLowerCase()} · ${label(pickProvider({ workflow: c.workflow, user: m.from, settings: st.settings }).provider)}`, c);
+        return drain();
+      }
+      case "approve": {
+        const item = approveLast(conv);
+        conv.awaitingGo = false;
+        save();
+        return reply(item ? `✅ Approved, kept with the chat for every model: ${item.slice(0, 200)}` : "Nothing to approve yet.", conv);
+      }
+      case "task": {
+        const t = conv.task ?? {};
+        return reply(
+          [
+            `*#${conv.n} ${conv.title || ""}* · ${who(conv)}`,
+            `Goal: ${t.goal || "(not set yet)"}`,
+            t.approved?.length ? `Approved:\n- ${t.approved.join("\n- ")}` : null,
+            t.done?.length ? `Done:\n- ${t.done.join("\n- ")}` : null,
+            t.left?.length ? `Left:\n- ${t.left.join("\n- ")}` : null,
+            t.files?.length ? `Files: ${t.files.join(", ")}` : null,
+            `Turns kept: ${(conv.history ?? []).length}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          conv,
+        );
+      }
+      case "logins": {
+        const l = logins();
+        const line = (n, ok, how) => `${ok ? "✅" : "⏳"} ${n}${ok ? "" : `: ${how}`}`;
+        return reply(
+          [
+            ...Object.entries(PROVIDERS).map(([p, d]) => {
+              const lim = limitState(st.settings, st.usage, p);
+              return `${line(d.label, l[p], `not signed in (sudo -iu ${conf.user} ${d.signIn})`)}${l[p] && lim.level !== "ok" ? ` · ${lim.level}` : ""}`;
+            }),
+            line("Jev (router)", l.jev, "no key yet (/etc/claude-me/jev.key)"),
+            line("Slack", Boolean(slack), "not set up"),
+          ].join("\n"),
+        );
+      }
+      case "usage":
+        return reply(usageReport(st.usage, LABELS, st.settings));
+      case "faults":
+        return reply(faultsReport(st.usage, LABELS));
+      case "force": {
+        const h = st.held;
+        if (!h || !st.convs[h.conv]) return reply("Nothing is held.");
+        st.held = null;
+        save();
+        waiting.push({ conv: st.convs[h.conv], m: { ...m, ...h.m }, text: h.text, plan: h.plan, force: true });
+        return drain();
       }
       case "model":
         conv.model = arg || null;
         save();
-        return say(`✅ Model in #${conv.n}: ${conv.model ?? "the default"}`, m.id, conv);
+        return reply(`✅ Model in #${conv.n} (${who(conv)}): ${conv.model ?? "the default"}`, conv);
       case "effort":
-        if (arg && !/^(low|medium|high|xhigh|max)$/.test(arg)) return say("/effort low | medium | high | xhigh | max", m.id);
+        if (arg && !/^(low|medium|high|xhigh|max)$/.test(arg)) return reply("/effort low | medium | high | xhigh | max");
         conv.effort = arg || null;
         save();
-        return say(`✅ Effort in #${conv.n}: ${conv.effort ?? "the default"}`, m.id, conv);
-      case "use": {
-        const p = providerOf(arg);
-        if (!p) return say("/use claude | gpt | grok", m.id);
-        if (p === (conv.provider ?? "claude")) return say(`#${conv.n} already uses ${PROVIDERS[p].label}.`, m.id, conv);
-        // Until the handoff (phase 2) carries a chat over, another worker starts a new chat.
-        const c = conv.session ? newConv(conv.cwd, conv.title ? `${conv.title} (${PROVIDERS[p].label})` : "") : conv;
-        c.provider = p;
-        c.model = null;
-        c.effort = conv.effort;
-        save();
-        const ok = logins()[p];
-        return say(`✅ #${c.n} uses ${PROVIDERS[p].label}${c !== conv ? " (a new chat)" : ""}${ok ? "" : `\n⚠️ ${PROVIDERS[p].label} isn't signed in yet: ${PROVIDERS[p].signIn}`}`, m.id, c);
-      }
-      case "logins": {
-        const l = logins();
-        const line = (name, ok, how) => `${ok ? "✅" : "⏳"} ${name}${ok ? "" : `: ${how}`}`;
-        return say(
-          [...Object.entries(PROVIDERS).map(([p, d]) => line(d.label, l[p], `not signed in (${d.signIn})`)), line("Jev (router)", l.jev, "no key yet")].join("\n"),
-          m.id,
-        );
-      }
+        return reply(`✅ Effort in #${conv.n}: ${conv.effort ?? "the default"}`, conv);
       case "plan":
-        if (!arg) return say("/plan then your request", m.id);
+        if (!arg) return reply("/plan then your request");
         waiting.push({ conv, m, text: await words({ ...m, body: arg }), plan: true });
         return drain();
       case "status": {
         const lines = Object.values(st.convs)
-          .filter((c) => runs.has(c.id) || waiting.some((w) => w.conv.id === c.id))
+          .filter((c) => busy(c.id) || waiting.some((w) => w.conv.id === c.id))
           .map((c) => {
-            const r = runs.get(c.id);
+            const live = [...runs.entries()].filter(([id, r]) => (id === c.id || id.startsWith(`${c.id}:`)) && r.child);
             const q = waiting.filter((w) => w.conv.id === c.id).length;
-            return `#${c.n} ${c.title || ""}: ${r ? `working ${Math.round((Date.now() - r.started) / MIN)} min${r.step ? ` · ${r.step}` : ""}` : "waiting"}${q ? ` · ${q} queued` : ""}`;
+            const doing = live.map(([, r]) => `${label(r.provider)} ${Math.round((Date.now() - r.started) / MIN)} min${r.step ? ` · ${r.step}` : ""}`).join("; ");
+            return `#${c.n} ${c.title || ""}: ${doing || "waiting"}${q ? ` · ${q} queued` : ""}`;
           });
-        return say(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${PROVIDERS[conv.provider ?? "claude"].label} · ${conv.model ?? "the default model"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "Nothing running."}`, m.id);
+        return reply(`▶ #${conv.n} ${conv.title || ""}\n📁 ${conv.cwd.replace(home, "~")}\n🧠 ${who(conv)} · ${conv.model ?? "the default model"}${conv.effort ? ` · effort ${conv.effort}` : ""}\n\n${lines.join("\n") || "Nothing running."}`);
       }
       case "stop": {
         const before = waiting.length;
         for (let i = waiting.length - 1; i >= 0; i--) if (waiting[i].conv.id === conv.id) waiting.splice(i, 1);
-        const r = runs.get(conv.id);
-        if (r?.child) {
+        const live = [...runs.entries()].filter(([id, r]) => (id === conv.id || id.startsWith(`${conv.id}:`)) && r.child);
+        for (const [, r] of live) {
           r.stopped = true;
           r.child.kill("SIGTERM");
-          return;
         }
-        return say(before !== waiting.length ? "✅ Removed what was waiting." : "Nothing running in this chat.", m.id);
+        if (live.length) return;
+        return reply(before !== waiting.length ? "✅ Removed what was waiting." : "Nothing running in this chat.");
       }
     }
   };
 
   // ------------------------------------------------------------------- loop --
+
+  /** New messages from either side, oldest first: commands at once, requests to the queue. */
+  const take = async (fresh) => {
+    for (const m of fresh) {
+      try {
+        const c = commandOf(m.body);
+        if (c) {
+          await command(c, m);
+          continue;
+        }
+        // A reply to one of the answers (or a Slack thread) goes on in that chat.
+        const replyKey = m.via === "slack" ? m.thread : m.replyTo?.id ? shortId(m.replyTo.id) : null;
+        const to = replyKey ? st.convs[st.sent[replyKey] ?? ""] : null;
+        const conv = to ?? current();
+        const text = await words(m);
+        if (!text) continue;
+        waiting.push({ conv, m, text, plan: false });
+        drain();
+      } catch (e) {
+        console.error("relay", e.message);
+        await say(`❌ Something went wrong: ${e.message}`, m.ref ?? m.id, null, m.via).catch(() => {});
+      }
+    }
+  };
 
   const poll = async () => {
     try {
@@ -555,28 +878,14 @@ function main() {
       const seen = new Set(st.seen);
       const fresh = newFromOwner(await r.json(), conf.owners, seen).filter((m) => (m.timestamp ?? 0) >= st.since);
       if (!fresh.length) return;
-      for (const m of fresh) st.seen.push(String(m.id));
+      for (const m of fresh) {
+        st.seen.push(String(m.id));
+        m.via = "wa";
+        m.from = String(m.participant ?? m.author ?? "");
+      }
       st.since = Math.max(st.since, ...fresh.map((m) => m.timestamp ?? 0));
       save();
-      for (const m of fresh) {
-        try {
-          const c = commandOf(m.body);
-          if (c) {
-            await command(c, m);
-            continue;
-          }
-          // A reply to one of Claude's messages goes on in that conversation.
-          const to = m.replyTo?.id ? st.convs[st.sent[shortId(m.replyTo.id)] ?? ""] : null;
-          const conv = to ?? current();
-          const text = await words(m);
-          if (!text) continue;
-          waiting.push({ conv, m, text, plan: false });
-          drain();
-        } catch (e) {
-          console.error("relay", e.message);
-          await say(`❌ Something went wrong: ${e.message}`, m.id).catch(() => {});
-        }
-      }
+      await take(fresh);
     } catch (e) {
       console.error("relay poll", e.message);
     }
@@ -587,13 +896,14 @@ function main() {
     mine(work);
   }
   save();
-  console.log(JSON.stringify({ ev: "relay.start", group: conf.group, owners: conf.owners.size, convs: Object.keys(st.convs).length }));
-  let busy = false;
+  slack?.start();
+  console.log(JSON.stringify({ ev: "relay.start", group: conf.group, owners: conf.owners.size, convs: Object.keys(st.convs).length, slack: Boolean(slack), logins: logins() }));
+  let polling = false;
   setInterval(async () => {
-    if (busy) return;
-    busy = true;
+    if (polling) return;
+    polling = true;
     await poll();
-    busy = false;
+    polling = false;
   }, 2 * SEC);
 }
 
