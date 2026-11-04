@@ -76,7 +76,7 @@ test("Grok's answer, read loosely until real output is checked", () => {
 });
 
 test("every answer's last line: who, which model, effort, time, cost or tokens", () => {
-  assert.equal(footer({ provider: "claude", model: "claude-opus-5-5", effort: "high", ms: 130000, cost: 0.4249 }), "_Claude · claude-opus-5-5 · effort high · 2m 10s · $0.42_");
+  assert.equal(footer({ provider: "claude", model: "claude-opus-5-5", effort: "high", ms: 130000, cost: 0.4249 }), "_Claude · claude-opus-5-5 · effort high · 2m 10s · ~$0.42 API value_");
   assert.equal(footer({ provider: "gpt", model: null, ms: 9000, usage: { in: 12345, out: 800 } }), "_GPT · default model · 9s · 12k in / 800 out_");
 });
 

@@ -180,7 +180,8 @@ const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : Str
 export function footer({ provider, model, effort, ms, cost, usage }) {
   const secs = Math.round(ms / 1000);
   const time = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
-  const spent = typeof cost === "number" ? `$${cost.toFixed(2)}` : usage ? `${k(usage.in)} in / ${k(usage.out)} out` : null;
+  // Claude on a subscription reports what the run would cost on the API: shown as that, not as a charge.
+  const spent = typeof cost === "number" ? `~$${cost.toFixed(2)} API value` : usage ? `${k(usage.in)} in / ${k(usage.out)} out` : null;
   return `_${[PROVIDERS[provider]?.label ?? provider, model || "default model", effort ? `effort ${effort}` : null, time, spent].filter(Boolean).join(" · ")}_`;
 }
 

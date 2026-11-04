@@ -78,7 +78,7 @@ export function usageReport(log, labels, settings, now = Date.now()) {
     const flag = lim.level === "paused" ? " · PAUSED" : lim.level === "over" ? ` · OVER ${lim.period} limit` : lim.level === "warn" ? ` · ${Math.round(lim.share * 100)}% of ${lim.period} limit` : "";
     lines.push(`${label}: ${cells.join(" · ")}${flag}`);
   }
-  lines.push("", "Dollars where the provider reports them (Claude, Jev); tokens otherwise (GPT, Grok subscriptions).");
+  lines.push("", "Claude: what the runs would cost on the API (nothing is charged on the subscription, but it is what uses up its limits). GPT, Grok: tokens.");
   return lines.join("\n");
 }
 
