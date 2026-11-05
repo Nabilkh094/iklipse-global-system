@@ -36,6 +36,7 @@ import { fileNameOf, linkTo, markdownOf, transcribe } from "./transcript.ts";
 import { loadTaught, numbered, taughtNotes, teachFrom } from "./notes.ts";
 import { asThem, boardCall, boardTools, BoardsRefused } from "./boards.ts";
 import { applyChange, kindOf, kindRules, overviewOf, skillNames, skillsFor } from "./permissions.ts";
+import { MASTER_CHAT } from "./master-env.ts";
 import {
   bookMeetingCapability,
   closeAlertCapability,
@@ -59,6 +60,7 @@ import {
   sha256,
   signedBy,
   tierNow,
+  ownerChats,
   toBrainPost,
   type Asker,
   type BrainEnv,
@@ -91,8 +93,10 @@ interface Run {
   request: string | null;
   quoted_id: string | null;
   created_at: string;
+  /** How it came: "private", "mention"..., or from the master (master.ts): "master", "master-auto". */
+  via?: string | null;
 }
-const RUN_COLS = "id, message_id, chat_id, reply_chat, asker, asker_name, tier, status, request, quoted_id, created_at";
+const RUN_COLS = "id, message_id, chat_id, reply_chat, asker, asker_name, tier, status, request, quoted_id, created_at, via";
 
 /** A run's tools work this long after it came in (the longest run is 60 minutes). */
 const RUN_LIFE_MS = 90 * MIN;
@@ -1262,6 +1266,8 @@ export async function callTool(d: Deps, name: string, p: Record<string, unknown>
   }
   const x = (p.input && typeof p.input === "object" ? p.input : {}) as Record<string, unknown>;
   if (spec.write && c.brain.stopped) throw new Refuse("The brain is stopped: it only reads until an admin says start.");
+  // The master asked by itself (master.ts): it only reads; doing anything waits for the super admin's go.
+  if (spec.write && run.via === "master-auto") throw new Refuse("Asked by the master by itself: reading only. Doing this needs the super admin's go.");
   // Mentioned in a client group: only what's about the people in it.
   if (spec.write) await clientGroupGate(c, name, x);
   try {
@@ -1504,6 +1510,8 @@ async function control(d: Deps, name: string, p: Record<string, unknown>) {
         // The super admin's own instructions for their kind (0137), said with the message.
         rules: c.asker.tier === "owner" ? "" : rules.instructions,
         stopped: c.brain.stopped,
+        // The master asked by itself (master.ts): reading only.
+        read_only: run.via === "master-auto",
         model,
         model_fast: c.brain.model_fast,
         max_turns: owner ? c.brain.max_turns : c.brain.member_turns,
@@ -1561,7 +1569,8 @@ ${WHO_IS_WHO}`,
           return { held: true };
         }
       }
-      return { id: await d.send(run.reply_chat, text, quote) };
+      // To the master group: always as the task's own reply (master.ts), however it was quoted.
+      return { id: await d.send(run.reply_chat, text, run.reply_chat === MASTER_CHAT ? run.message_id : quote) };
     }
     case "_step": {
       const run = await runOf(db, p.run_id, false);
@@ -1667,7 +1676,7 @@ async function spendWatch(d: Deps) {
         pct === 100
           ? `The brain spent $${spent.toFixed(2)} today, its daily limit ($${b.day_cost_usd}). It answers nobody until tomorrow, or until the limit is raised (Alerts > Brain).`
           : `The brain spent $${spent.toFixed(2)} today, 80% of its daily limit ($${b.day_cost_usd}).`;
-      for (const p of b.owner_phones) await d.send(`${p}@c.us`, text).catch(() => null);
+      for (const chat of ownerChats(b)) await d.send(chat, text).catch(() => null);
     }
     break;
   }

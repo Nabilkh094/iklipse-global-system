@@ -105,6 +105,7 @@ import { lidPhones, linkTeamLids, mentionNamer } from "./timeline.ts";
 import { writeDayNotes } from "./daynotes.ts";
 import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
 import { mayTalk } from "./permissions.ts";
+import { MASTER_CHAT, masterApi, masterOut } from "./master.ts";
 import { brainApi, carryOut, type Deps, type SendFile } from "./brain-tools.ts";
 
 const ELEVEN_KEY = env("ELEVEN_API_KEY") || env("ELEVENLABS_API_KEY");
@@ -1366,6 +1367,8 @@ async function readFileNow(db: Db, id: string) {
 const sendAs =
   (cfg: Config): Send =>
   async (chatId, said, quotedId, mentions) => {
+    // The master group isn't on WhatsApp: kept for the master to read (master.ts).
+    if (chatId === MASTER_CHAT) return await masterOut(serviceClient(), said, quotedId);
     // Links go out as they are (Calendly's own, not shortened).
     const text = said;
     // The numbers tagged in it ("@2010..."): real tags only when named to WAHA (waha.ts sendTextBody).
@@ -1964,6 +1967,12 @@ Deno.serve(async (req) => {
   // The brain's tools (brain-tools.ts), signed by the brain: /whatsapp-bot/brain-tools/<name>.
   const path = new URL(req.url).pathname.split("/").filter(Boolean);
   if (path.at(-2) === "brain-tools") return await brainApi(req, r, () => brainDeps(db));
+  // The super admin's master agent (master.ts), signed with its own secret: /whatsapp-bot/master/<op>.
+  if (path.at(-2) === "master") {
+    return await masterApi(req, r, db, {
+      words: async (o) => await ownerNow(db, { id: o.id, chatId: MASTER_CHAT, phone: o.phone, lid: null, text: o.text, quotedId: null }),
+    });
+  }
 
   if (r === "waha") {
     try {

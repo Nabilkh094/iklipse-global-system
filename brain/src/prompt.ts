@@ -29,6 +29,8 @@ export interface Start {
   skills?: string[] | null;
   /** The super admin's own instructions for their kind (0137). */
   rules?: string;
+  /** The master asked by itself (whatsapp-bot master.ts): reading only, this run. */
+  read_only?: boolean;
 }
 
 /** A message the function handed over (whatsapp-bot brain.ts forward). */
@@ -131,6 +133,7 @@ export function runNotes(s: Start, earlier: string) {
     // Their permissions and the super admin's rules for them: fresh with every message (a change counts at once).
     ...(s.skills && s.asker.tier !== "owner" ? [`Their permissions now (only these): ${s.skills.filter((k) => k !== "talk").join(", ") || "none"}.`] : []),
     ...(s.rules ? ["", "The super admin's rules for them (follow them):", asData(s.rules)] : []),
+    ...(s.read_only ? ["This came from the super admin's master agent by itself: only read and answer. Anything that sends or changes something needs the super admin's go: say exactly what you would do, and do nothing."] : []),
     ...(s.stopped ? ["The brain is stopped (the super admin's kill switch): you can only read. Asked to change anything, say it's stopped until the super admin says start."] : []),
     ...(earlier ? ["", "Last time with them (a summary; they may start something new):", earlier] : []),
     ...(s.approvals.length ? ["", "Done lately for this chat (the system's own):", ...s.approvals.map((a) => `- ${a.what}: ${a.status}${a.result ? ` (${a.result})` : ""}`)] : []),

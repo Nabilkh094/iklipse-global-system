@@ -30,6 +30,7 @@
 import { env, iso, MIN, str, type Db } from "./kit.ts";
 import type { Send } from "./people.ts";
 import type { Via } from "./gate.ts";
+import { MASTER_CHAT, masterOn } from "./master-env.ts";
 
 export type Tier = "owner" | "admin" | "member" | "client";
 /** The team's tiers: the ones with a profile. */
@@ -185,8 +186,12 @@ export async function fromOwner(db: Db, s: BrainSettings, who: { phone: string |
 
 // ---------------------------------------------------------------- signing --
 
-/** to-brain: this function to the brain; to-bot: the brain to this function. A request can't be sent back the other way. */
-export type Dir = "to-brain" | "to-bot";
+/**
+ * to-brain: this function to the brain; to-bot: the brain to this function;
+ * master: the super admin's master agent (the relay on the VPS) to this
+ * function, with its own secret (master.ts). A request can't be sent back the other way.
+ */
+export type Dir = "to-brain" | "to-bot" | "master";
 const enc = new TextEncoder();
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -260,6 +265,8 @@ export interface Forward {
   /** Where the answer goes: this chat, or (from a client group) their private chat. */
   replyChat: string;
   chatName?: string | null;
+  /** From the super admin's master agent (master.ts): "master", or "master-auto" (it asked by itself: reading only). */
+  tag?: "master" | "master-auto";
 }
 
 /**
@@ -282,7 +289,7 @@ export async function forward(db: Db, e: BrainEnv, o: Forward, f: typeof fetch =
       tier: o.asker.tier,
       client_id: o.asker.tier === "client" ? (o.asker.clientId ?? null) : null,
       quoted_id: o.quotedId ?? null,
-      via: o.where === "private" ? "private" : o.via ?? null,
+      via: o.tag ?? (o.where === "private" ? "private" : o.via ?? null),
       request: o.text.slice(0, 4000),
       status: "queued",
     })
@@ -308,7 +315,7 @@ export async function forward(db: Db, e: BrainEnv, o: Forward, f: typeof fetch =
     reply_chat: o.replyChat,
     where: o.where,
     chat_name: o.chatName ?? null,
-    via: o.where === "private" ? "private" : o.via ?? null,
+    via: o.tag ?? (o.where === "private" ? "private" : o.via ?? null),
     sender: { id: o.asker.id, name: o.asker.name, tier: o.asker.tier },
     text: o.text,
     quoted: o.quoted ? { id: o.quotedId ?? null, text: o.quoted.slice(0, 4000) } : null,
@@ -420,8 +427,11 @@ function fourDigits() {
   return String(b[0]! % 10_000).padStart(4, "0");
 }
 
-/** Where the owner is written to: each owner number's private chat. */
-const ownerChats = (s: BrainSettings) => s.owner_phones.map((p) => `${p}@c.us`);
+/**
+ * Where the super admin is written to: the master group (master.ts) once the
+ * master channel is set up, else each of their numbers' private chat.
+ */
+export const ownerChats = (s: BrainSettings) => (masterOn() ? [MASTER_CHAT] : s.owner_phones.map((p) => `${p}@c.us`));
 
 /**
  * An action held for the owner's OK: kept with its exact input and a code
