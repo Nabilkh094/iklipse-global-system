@@ -40,8 +40,10 @@ export interface BrainSettings {
   stopped: boolean;
   /** Every WhatsApp number of the super admins (0131 keeps it from owner_users). */
   owner_phones: string[];
-  /** The super admins, by account (0131). */
+  /** The super admins, by account (0131): always the one super admin (0136). */
   owner_users?: string[];
+  /** The one super admin (0136); null before it. */
+  super_admin?: string | null;
   /** The brain down: the old order router answers (else the person hears it's down for a moment). */
   fallback_old: boolean;
   model_owner: string;
@@ -80,6 +82,7 @@ export async function brainSettings(db: Db): Promise<BrainSettings | null> {
     stopped: r.stopped === true,
     owner_phones: ((r.owner_phones ?? []) as unknown[]).map((p) => digits(p)).filter(Boolean),
     owner_users: ((r.owner_users ?? []) as unknown[]).map((u) => str(u)).filter(Boolean),
+    super_admin: str(r.super_admin) || null,
     fallback_old: r.fallback_old === true,
     model_owner: str(r.model_owner) || "claude-opus-5-5",
     model_member: str(r.model_member) || "claude-sonnet-5-5",

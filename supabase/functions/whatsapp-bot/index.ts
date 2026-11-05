@@ -104,6 +104,7 @@ import { toHook, wahaCall, wahaCode, wahaEnsure, wahaInfo, wahaLogout, wahaMisse
 import { lidPhones, linkTeamLids, mentionNamer } from "./timeline.ts";
 import { writeDayNotes } from "./daynotes.ts";
 import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
+import { mayTalk } from "./permissions.ts";
 import { brainApi, carryOut, type Deps, type SendFile } from "./brain-tools.ts";
 
 const ELEVEN_KEY = env("ELEVEN_API_KEY") || env("ELEVENLABS_API_KEY");
@@ -1032,6 +1033,8 @@ async function fromPrivate(
   db: Db,
   o: { id: string; chatId: string; raw: string; text: string; quotedId: string | null; phone: string; asks: boolean; told?: string | null; lid?: string | null },
 ) {
+  // Blocked by the super admin (permissions.ts, talk off): kept, nothing more.
+  if (await blockedNow(db, { phone: o.told ?? o.phone, lid: o.lid ?? null, chat: o.chatId })) return;
   // "ok" to a repeating reminder is the answer: it stops (reminders.ts).
   const sayer = (await team(db)).byPhone.get(o.phone);
   if (sayer) await ackReminder(db, sayer.id, o.text, o.quotedId).catch((e) => console.error("reminder ack", (e as Error).message));
@@ -1175,6 +1178,11 @@ async function orderNow(
     chatName?: string | null;
   },
 ) {
+  // Blocked by the super admin (permissions.ts, talk off): nothing is taken from them.
+  if (o.told !== undefined && (await blockedNow(db, { phone: o.told ?? o.phone ?? null, lid: o.brainLid ?? o.lid ?? null, chat: o.chatId }))) {
+    await firstTime(db, `order:${o.id}`);
+    return;
+  }
   if (o.told !== undefined && (await brainNow(db, o))) return;
   const [s, cfg, t] = await Promise.all([settings(db), config(db), team(db)]);
   await takeOrder(db, s, t, sendAs(cfg), o, (id) => answerNow(db, id));
@@ -1217,6 +1225,20 @@ async function brainNow(db: Db, o: Parameters<typeof orderNow>[1]): Promise<bool
 }
 
 /**
+ * The super admin turned talking to the bot off for them (permissions.ts):
+ * by their account when they're on the team, else by their number. Never the
+ * super admin. false when the brain isn't set up.
+ */
+async function blockedNow(db: Db, o: { phone: string | null; lid: string | null; chat: string }): Promise<boolean> {
+  const bs = await brainSettings(db);
+  if (!bs) return false;
+  const asker = await tierOf(db, bs, { phone: o.phone, lid: o.lid });
+  if (asker?.tier === "owner") return false;
+  const phone = o.phone ?? (o.chat.endsWith("@c.us") ? o.chat.split("@")[0]! : null);
+  return !(await mayTalk(db, { user: asker?.id ?? null, phone, tier: asker?.tier ?? "client", chat: o.chat }));
+}
+
+/**
  * Who the brain takes a private message from (brain.ts): someone on the team
  * it answers ("team"), anyone else once it's on for clients ("client"), or
  * nobody (null: the old bot, as before).
@@ -1250,6 +1272,8 @@ async function clientBrain(db: Db): Promise<ClientBrain | undefined> {
   const bs = await brainSettings(db);
   if (!bs || !reaches(bs, "client")) return undefined;
   return async (o) => {
+    // Blocked by the super admin: handled, with no answer.
+    if (await blockedNow(db, { phone: o.phone ?? null, lid: null, chat: o.chatId })) return true;
     const c = o.phone ? await clientByPhone(db, o.phone) : null;
     const name = (c?.name_known ? c.name : o.name) || (o.phone ? `+${o.phone}` : "Someone");
     // A try that the brain didn't take is tried again, not taken as done.

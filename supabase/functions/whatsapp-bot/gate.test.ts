@@ -351,7 +351,7 @@ test("index.ts: no 'no mention needed' in the alerts group; group messages go th
   // Only a message the gate lets through is handed to the router, with how it came.
   assert.match(index, /else if \(via\) \{[\s\S]*?orderNow\(db, \{[\s\S]*?via,[\s\S]*?\}\),/);
   // To the brain first when it takes it (brain.ts), else the router, as before.
-  assert.match(index, /chatName\?: string \| null;\s*\},?\s*\) \{\s*if \(o\.told !== undefined && \(await brainNow\(db, o\)\)\) return;\s*const \[s, cfg, t\] = await Promise\.all\(\[settings\(db\), config\(db\), team\(db\)\]\);\s*await takeOrder\(db, s, t, sendAs\(cfg\), o,/);
+  assert.match(index, /chatName\?: string \| null;\s*\},?\s*\) \{\s*(?:\/\/ Blocked by the super admin[^\n]*\n\s*if \(o\.told !== undefined && \(await blockedNow\([^\n]*\n\s*await firstTime\(db, `order:\$\{o\.id\}`\);\s*return;\s*\}\s*)?if \(o\.told !== undefined && \(await brainNow\(db, o\)\)\) return;\s*const \[s, cfg, t\] = await Promise\.all\(\[settings\(db\), config\(db\), team\(db\)\]\);\s*await takeOrder\(db, s, t, sendAs\(cfg\), o,/);
   // The old gate is gone.
   assert.doesNotMatch(index, /mentionsBot\(db, m\.text/);
 });

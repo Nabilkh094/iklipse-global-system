@@ -264,6 +264,22 @@ const SERVER = {
       "Change the brain's own settings: phase (0 owner, 1 admins too, 2 members too, 3 clients too), fallback_old (true: the old bot answers when the brain is down), model_owner, model_member, model_fast, max_turns, member_turns, run_minutes, run_cost_usd, day_cost_usd.",
     shape: { patch: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])), why },
   },
+  permissions: {
+    about:
+      "Who may have the bot do what: the super admin's alone, on WhatsApp or from the master. Apart from roles. list: the skills, each kind's defaults (admin, member, client: anyone not on the team) and rules, and everyone's own grants. give / take: skills for one person (member: profile.id, or phone: anyone's number, outside the team too), optionally only_in some chats ('private' or group chat ids). block / unblock: the bot ignores them, or not. reset: their own grants gone (or only some skills): their kind's defaults again. default: what every admin, member or client may do. rules: a kind on or off (enabled) and your instructions for them. Every change counts from their next message. Say exactly what changed.",
+    shape: {
+      action: z.enum(["list", "give", "take", "block", "unblock", "reset", "default", "rules"]),
+      member: z.string().optional().describe("profile.id of someone on the team."),
+      phone: z.string().optional().describe("A WhatsApp number (digits), for anyone not on the team, or a number."),
+      skills: z.array(z.string()).optional().describe("Skill keys from list."),
+      only_in: z.array(z.string()).optional().describe("Only in these chats: 'private' (their private chat) or group chat ids. Empty: everywhere."),
+      kind: z.enum(["admin", "member", "client"]).optional(),
+      allowed: z.boolean().optional().describe("For default: may or may not."),
+      enabled: z.boolean().optional().describe("For rules: the bot answers this kind at all."),
+      instructions: z.string().optional().describe("For rules: your instructions to the bot for this kind (replaces them)."),
+      note: z.string().optional(),
+    },
+  },
 } satisfies Record<keyof typeof SERVER_TOOLS, { about: string; shape: Record<string, z.ZodTypeAny> }>;
 
 /** The brain's own tools: what Claude reads, what it takes. */

@@ -66,6 +66,8 @@ export const SERVER_TOOLS: Record<string, ToolRule> = {
   team_member: { tiers: ADMINS, readOnly: false },
   bot_settings: { tiers: ADMINS, readOnly: false },
   brain_settings: { tiers: OWNER, readOnly: false },
+  // Who may have the bot do what (0137): the super admin's alone.
+  permissions: { tiers: OWNER, readOnly: false },
 };
 
 /** The brain's own tools (github.ts). */
@@ -95,20 +97,45 @@ const READ_BUILTINS = new Set(["Read", "Glob", "Grep", "WebFetch", "TodoWrite", 
 
 export const MCP = "mcp__iklipse__";
 
-/** Changing the system (files, shell, GitHub, skills): the owner or an admin, privately only. */
-export const devRun = (tier: Tier, privately: boolean) => (tier === "owner" || tier === "admin") && privately;
+/**
+ * What they may have the bot do now (the function's _start, 0137): the tool
+ * names, plus "dev" (files and the shell). null: before 0137, by the tiers.
+ */
+export type Skills = readonly string[] | null | undefined;
 
-export const builtinsFor = (tier: Tier, dev = true) => (devRun(tier, dev) ? [...BUILTINS, SKILL] : [SKILL]);
+/**
+ * Changing the system (files, shell, GitHub, skills), privately only: by
+ * their permissions (dev or one of the brain's own tools), else the owner or
+ * an admin.
+ */
+export const devRun = (tier: Tier, privately: boolean, skills?: Skills) =>
+  privately && (skills ? skills.some((k) => k === "dev" || !!OWN_TOOLS[k]) : tier === "owner" || tier === "admin");
+
+/** Files and the shell: dev, privately (else the owner or an admin, before 0137). */
+const shellRun = (tier: Tier, privately: boolean, skills?: Skills) => (skills ? privately && skills.includes("dev") : devRun(tier, privately));
+
+export const builtinsFor = (tier: Tier, dev = true, skills?: Skills) => (shellRun(tier, dev, skills) ? [...BUILTINS, SKILL] : [SKILL]);
+
+/** May they use this tool of ours: their permissions, else the tier. */
+const mayUse = (name: string, r: ToolRule, tier: Tier, skills?: Skills) => (skills ? skills.includes(name) : r.tiers.includes(tier));
 
 /** Who a refusal names. */
 const whom = (tier: Tier) => (tier === "client" ? "clients" : tier === "member" ? "members" : "admins");
 
-/** Every tool this run may call (allowedTools; with dontAsk, anything else is refused). dev: privately, the owner or an admin. */
-export function allowedToolsFor(tier: Tier, dev = true): string[] {
-  const mcp = Object.entries({ ...SERVER_TOOLS, ...(devRun(tier, dev) ? OWN_TOOLS : {}) })
-    .filter(([, r]) => r.tiers.includes(tier))
+/** Every tool this run may call (allowedTools; with dontAsk, anything else is refused). dev: privately. */
+export function allowedToolsFor(tier: Tier, dev = true, skills?: Skills): string[] {
+  const mcp = Object.entries({ ...SERVER_TOOLS, ...(devRun(tier, dev, skills) ? OWN_TOOLS : {}) })
+    .filter(([n, r]) => mayUse(n, r, tier, skills))
     .map(([n]) => `${MCP}${n}`);
-  return [...builtinsFor(tier, dev), ...mcp];
+  return [...builtinsFor(tier, dev, skills), ...mcp];
+}
+
+/** Our tools this run may not call: not shown to Claude at all (disallowedTools). */
+export function hiddenToolsFor(tier: Tier, dev = true, skills?: Skills): string[] {
+  const allowed = new Set(allowedToolsFor(tier, dev, skills));
+  return Object.keys({ ...SERVER_TOOLS, ...OWN_TOOLS })
+    .map((n) => `${MCP}${n}`)
+    .filter((n) => !allowed.has(n));
 }
 
 /** Never offered at all: other agents (they'd run with their own rules), the web search, notebooks. */
@@ -119,17 +146,18 @@ const no = (why: string): Verdict => ({ ok: false, why });
 const yes: Verdict = { ok: true };
 
 /** May this tier call this tool now (while stopped: reading only; the system's own tools only privately). */
-export function toolVerdict(tool: string, tier: Tier, stopped: boolean, dev = true): Verdict {
+export function toolVerdict(tool: string, tier: Tier, stopped: boolean, dev = true, skills?: Skills): Verdict {
   if (tool.startsWith(MCP)) {
     const name = tool.slice(MCP.length);
     const r = SERVER_TOOLS[name] ?? OWN_TOOLS[name];
     if (!r) return no(`There's no tool ${name}.`);
-    if (OWN_TOOLS[name] && !devRun(tier, dev)) return no("Changes to the system are asked for privately: ask me in our private chat.");
-    if (!r.tiers.includes(tier)) return no(`${name} isn't for ${whom(tier)}.`);
+    if (OWN_TOOLS[name] && !dev) return no("Changes to the system are asked for privately: ask me in our private chat.");
+    if (!mayUse(name, r, tier, skills)) return no(skills ? `They don't have permission for ${name}. Only the super admin can give it.` : `${name} isn't for ${whom(tier)}.`);
+    if (OWN_TOOLS[name] && !devRun(tier, dev, skills)) return no("Changes to the system are asked for privately: ask me in our private chat.");
     if (stopped && !r.readOnly) return no("The brain is stopped: it only reads until the super admin says start.");
     return yes;
   }
-  if (!builtinsFor(tier, dev).includes(tool)) return no(`${tool} isn't for ${tier === "owner" || tier === "admin" ? "this chat: files and the shell are for our private chat" : whom(tier)}.`);
+  if (!builtinsFor(tier, dev, skills).includes(tool)) return no(`${tool} isn't for ${tier === "owner" || tier === "admin" ? "this chat: files and the shell are for our private chat" : whom(tier)}.`);
   if (stopped && !READ_BUILTINS.has(tool)) return no("The brain is stopped: it only reads until the super admin says start.");
   return yes;
 }

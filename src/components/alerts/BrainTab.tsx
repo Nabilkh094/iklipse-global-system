@@ -13,6 +13,7 @@ import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useAuth } from "@/lib/auth";
 import { relativeTime } from "@/lib/format";
 import { BrainRuns } from "@/components/alerts/BrainRuns";
+import { BrainPermissions } from "@/components/alerts/BrainPermissions";
 import { BRAIN_MODELS, fetchBrain, saveBrainSettings, type BrainPatch, type BrainSettings } from "@/lib/brainApi";
 
 // -----------------------------------------------------------------------------
@@ -70,7 +71,11 @@ function draftOf(s: BrainSettings): Draft {
 
 /** Alerts > Brain: its settings, or its runs (a table across the page). */
 export function BrainTab() {
-  const [view, setView] = useState<"settings" | "runs">("settings");
+  const [view, setView] = useState<"settings" | "runs" | "permissions">("settings");
+  const { profile } = useAuth();
+  const b = useQuery({ queryKey: ["brain"], queryFn: () => fetchBrain(), refetchInterval: 30_000 });
+  // Permissions (0137): shown to the super admin alone.
+  const isSuper = !!profile && b.data?.settings.super_admin === profile.id;
   return (
     <div className="space-y-5">
       <Segmented
@@ -78,10 +83,11 @@ export function BrainTab() {
         options={[
           { value: "settings", label: "Settings" },
           { value: "runs", label: "Runs" },
+          ...(isSuper ? [{ value: "permissions" as const, label: "Permissions" }] : []),
         ]}
         onChange={setView}
       />
-      {view === "runs" ? <BrainRuns /> : <BrainSettingsView />}
+      {view === "runs" ? <BrainRuns /> : view === "permissions" && isSuper ? <BrainPermissions /> : <BrainSettingsView />}
     </div>
   );
 }

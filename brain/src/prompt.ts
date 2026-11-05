@@ -25,6 +25,10 @@ export interface Start {
   approvals: { what: string; status: string; result: string | null }[];
   /** What's going on with them (brain-tools.ts contextFor): the chat so far, orders, what the bot asked and waits on. */
   context?: string;
+  /** What they may have the bot do now (0137): the tools and "dev"; null before 0137 (by the tiers). */
+  skills?: string[] | null;
+  /** The super admin's own instructions for their kind (0137). */
+  rules?: string;
 }
 
 /** A message the function handed over (whatsapp-bot brain.ts forward). */
@@ -62,6 +66,17 @@ function cavemanRules() {
   return ["## How every answer is written (caveman, always on, every message)", body.replace(/^(#+) /gm, "##$1 ")].join("\n\n");
 }
 
+/** With permissions (0137): what they may have you do is what they have, not their role. */
+const PERMISSION_RULE: Record<Start["asker"]["tier"], string> = {
+  owner: "They're the super admin (the one owner of the system): everything is theirs to ask for, done at once (meetings excepted: their yes first), permissions too. Changes to the system (code, merging, deploying, skills) only in their private chat with you.",
+  admin:
+    "They're an admin on the team. What they may have you do is their permissions (the super admin sets them): the tools you have in this run, and the list with each message. Anything else: say in a few words they don't have that permission and only the super admin can give it. Changes to the system only in their private chat with you. Your settings, permissions and the super admin's own account are the super admin's alone.",
+  member:
+    "They're on the team (a member). What they may have you do is their permissions (the super admin sets them): the tools you have in this run, and the list with each message. Anything else: say in a few words they don't have that permission and only the super admin can give it.",
+  client:
+    "They're not on the team: a client (or a freelancer, a partner's person, someone new). Read the client part of your instructions: only what's theirs, the team decides anything risky, always in English. Only the tools you have in this run.",
+};
+
 const TIER_RULE: Record<Start["asker"]["tier"], string> = {
   owner: "They're the super admin (the owner of the system, an admin too): every tool you have is theirs to ask for, done at once (meetings excepted: their yes first). Changes to the system (code, merging, deploying, skills) only in their private chat with you.",
   admin:
@@ -89,7 +104,7 @@ export function runInstructions(s: Start, m: Incoming, changes = "") {
   return [
     brainInstructions(),
     "## This conversation",
-    `- Asking: ${s.asker.name}. ${TIER_RULE[s.asker.tier]} Their time zone: ${s.asker.zone}.`,
+    `- Asking: ${s.asker.name}. ${(s.skills ? PERMISSION_RULE : TIER_RULE)[s.asker.tier]} Their time zone: ${s.asker.zone}.`,
     `- Where: ${where}.`,
     "- Each message comes with what's true right now (the time, what's going on with them): use the latest.",
     ...(s.taught ? ["", "## What the team taught you", s.taught] : []),
@@ -113,6 +128,9 @@ export function runNotes(s: Start, earlier: string) {
     s.asker.tier === "client"
       ? "Write to them polite, complete and short, in English."
       : 'Write caveman, in English: no articles (a, an, the), no filler, no "I", fragments. "Booked: call with Sara, Sun 1 Nov 4 PM Cairo." not "I have booked a call with Sara for Sunday."',
+    // Their permissions and the super admin's rules for them: fresh with every message (a change counts at once).
+    ...(s.skills && s.asker.tier !== "owner" ? [`Their permissions now (only these): ${s.skills.filter((k) => k !== "talk").join(", ") || "none"}.`] : []),
+    ...(s.rules ? ["", "The super admin's rules for them (follow them):", asData(s.rules)] : []),
     ...(s.stopped ? ["The brain is stopped (the super admin's kill switch): you can only read. Asked to change anything, say it's stopped until the super admin says start."] : []),
     ...(earlier ? ["", "Last time with them (a summary; they may start something new):", earlier] : []),
     ...(s.approvals.length ? ["", "Done lately for this chat (the system's own):", ...s.approvals.map((a) => `- ${a.what}: ${a.status}${a.result ? ` (${a.result})` : ""}`)] : []),
