@@ -37,6 +37,7 @@ import { loadTaught, numbered, taughtNotes, teachFrom } from "./notes.ts";
 import { asThem, boardCall, boardTools, BoardsRefused } from "./boards.ts";
 import { applyChange, kindOf, kindRules, overviewOf, skillNames, skillsFor } from "./permissions.ts";
 import { MASTER_CHAT } from "./master-env.ts";
+import { addSchedule, nextRun, sayRule, schedulesOf } from "./schedules.ts";
 import {
   bookMeetingCapability,
   closeAlertCapability,
@@ -228,7 +229,7 @@ async function ctxOf(d: Deps, run: Run): Promise<Ctx> {
     dir,
     names,
     by: { ...by, admin: asker.admin || asker.tier === "owner" },
-    at: { chat_id: run.reply_chat, message_id: run.reply_chat === run.chat_id ? run.message_id : null },
+    at: { chat_id: run.reply_chat, message_id: run.reply_chat === run.chat_id && !run.message_id.startsWith("schedule:") ? run.message_id : null },
     skills,
   };
 }
@@ -1077,6 +1078,46 @@ export const TOOLS: Record<string, Spec> = {
       return { said: `Changed: ${patchText(patch)}.` };
     },
   },
+  // Scheduled tasks (0139, schedules.ts): theirs, run as them each time.
+  schedule: {
+    tiers: ADMINS,
+    write: true,
+    run: async (x, c) => {
+      const action = str(x.action) || "list";
+      const list = await schedulesOf(c.d.db, c.asker.id);
+      const zone = c.dir.team.get(c.asker.id)?.zone ?? TZ;
+      const line = (s: (typeof list)[number], i: number) => `${i + 1}. ${s.text.slice(0, 120)}: ${sayRule(s)}${s.enabled ? (s.next_at ? `, next ${s.next_at}` : "") : " (off)"}`;
+      if (action === "list") return { said: list.length ? list.map(line).join("\n") : "No scheduled tasks." };
+      if (action === "add") {
+        try {
+          const s = await addSchedule(c.d.db, c.asker.id, {
+            text: str(x.text),
+            every: str(x.every) as "once" | "day" | "weekdays" | "week" | "month",
+            days: Array.isArray(x.days) ? (x.days as unknown[]).map(Number) : [],
+            at: str(x.at),
+            on_date: str(x.on_date) || null,
+            zone,
+          });
+          return { said: `Scheduled: ${s.text.slice(0, 120)}, ${sayRule(s)}. Next: ${s.next_at}.` };
+        } catch (e) {
+          throw new Refuse(`Not scheduled: ${(e as Error).message}`);
+        }
+      }
+      const n = Number(x.number);
+      const s = list[n - 1];
+      if (!s) throw new Refuse("Which one (its number from list)?");
+      if (action === "stop") {
+        await c.d.db.from("brain_schedule").delete().eq("id", s.id);
+        return { said: `Removed: ${s.text.slice(0, 120)}.` };
+      }
+      if (action === "pause" || action === "resume") {
+        const next = action === "resume" ? nextRun(s) : null;
+        await c.d.db.from("brain_schedule").update({ enabled: action === "resume" && next !== null, ...(next ? { next_at: iso(next) } : {}) }).eq("id", s.id);
+        return { said: action === "pause" ? `Paused: ${s.text.slice(0, 120)}.` : `On again: ${s.text.slice(0, 120)}, next ${next ? iso(next) : "never"}.` };
+      }
+      throw new Refuse("action: list, add, stop, pause or resume.");
+    },
+  },
   // Who may have the bot do what (0137): the super admin's alone, never given to anyone.
   permissions: {
     tiers: OWNER,
@@ -1543,7 +1584,8 @@ ${WHO_IS_WHO}`,
       if (Date.now() - Date.parse(run.created_at) > RUN_LIFE_MS) throw new Refuse("This run is over.");
       const text = str(p.text).slice(0, 4000);
       if (!text) throw new Refuse("Nothing to say.");
-      const quote = p.quote !== false && run.reply_chat === run.chat_id ? run.message_id : null;
+      // A scheduled task's run answers no message of theirs (schedules.ts): nothing quoted.
+      const quote = p.quote !== false && run.reply_chat === run.chat_id && !run.message_id.startsWith("schedule:") ? run.message_id : null;
       if (run.tier === "client") {
         // To a client, only what's theirs (guard.ts), as the bot's own replies always were: caught, they hear
         // we're checking, and the team gets the reply to OK or change.

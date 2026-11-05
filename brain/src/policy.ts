@@ -66,6 +66,8 @@ export const SERVER_TOOLS: Record<string, ToolRule> = {
   team_member: { tiers: ADMINS, readOnly: false },
   bot_settings: { tiers: ADMINS, readOnly: false },
   brain_settings: { tiers: OWNER, readOnly: false },
+  // Scheduled tasks (0139): admins by default, as reminders.
+  schedule: { tiers: ADMINS, readOnly: false },
   // Who may have the bot do what (0137): the super admin's alone.
   permissions: { tiers: OWNER, readOnly: false },
 };

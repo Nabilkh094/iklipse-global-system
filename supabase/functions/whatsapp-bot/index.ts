@@ -106,6 +106,7 @@ import { writeDayNotes } from "./daynotes.ts";
 import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
 import { mayTalk } from "./permissions.ts";
 import { MASTER_CHAT, masterApi, masterOut } from "./master.ts";
+import { runSchedules } from "./schedules.ts";
 import { brainApi, carryOut, type Deps, type SendFile } from "./brain-tools.ts";
 
 const ELEVEN_KEY = env("ELEVEN_API_KEY") || env("ELEVENLABS_API_KEY");
@@ -1794,7 +1795,7 @@ async function tick(db: Db) {
   const t0 = Date.now();
   const s = await settings(db);
   if (!s.enabled && !s.mail_enabled && !s.slack_enabled) return { off: true };
-  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, noted: 0, stale: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
+  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, scheduled: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, noted: 0, stale: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
   const cfg = await config(db);
   const t = await team(db);
 
@@ -1818,6 +1819,8 @@ async function tick(db: Db) {
         }
       },
     },
+    // Scheduled tasks that are due (schedules.ts, 0139): the brain does each as its owner, privately.
+    { name: "schedules", ms: 40_000, run: async (deadline) => void (out.scheduled = await runSchedules(db, deadline)) },
     // Reminders that are due (reminders.ts, 0110), privately: their time was worked out when they were set (working hours included).
     { name: "reminders", ms: 40_000, run: async (deadline) => void (out.reminders = await sendReminders(db, sendAs(cfg), (await directory(db)).team, deadline, s)) },
     ...(s.enabled ? [{ name: "whatsapp", ms: RUN_MS, run: (deadline: number) => whatsappTick(db, s, cfg, t, deadline, out) }] : []),

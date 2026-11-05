@@ -264,6 +264,19 @@ const SERVER = {
       "Change the brain's own settings: phase (0 owner, 1 admins too, 2 members too, 3 clients too), fallback_old (true: the old bot answers when the brain is down), model_owner, model_member, model_fast, max_turns, member_turns, run_minutes, run_cost_usd, day_cost_usd.",
     shape: { patch: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])), why },
   },
+  schedule: {
+    about:
+      "Their scheduled tasks: something you do for them on a schedule (every day, working days Sun to Thu, some days of the week, some days of the month, or once on a day), at a time in their zone. Each time it runs as if they had just asked you, with their permissions then. add (text: exactly what to do then, written as their request; every; days; at HH:MM 24h; on_date for once), list, stop / pause / resume (number from list). Something that only reminds a person is set_reminder, not this.",
+    shape: {
+      action: z.enum(["list", "add", "stop", "pause", "resume"]),
+      text: z.string().optional(),
+      every: z.enum(["once", "day", "weekdays", "week", "month"]).optional(),
+      days: z.array(z.number().int()).optional().describe("week: 0 Sunday .. 6 Saturday; month: 1..31."),
+      at: z.string().optional().describe("HH:MM, 24 hours, their time."),
+      on_date: z.string().optional().describe("YYYY-MM-DD, for once."),
+      number: z.number().int().optional(),
+    },
+  },
   permissions: {
     about:
       "Who may have the bot do what: the super admin's alone, on WhatsApp or from the master. Apart from roles. list: the skills, each kind's defaults (admin, member, client: anyone not on the team) and rules, and everyone's own grants. give / take: skills for one person (member: profile.id, or phone: anyone's number, outside the team too), optionally only_in some chats ('private' or group chat ids). block / unblock: the bot ignores them, or not. reset: their own grants gone (or only some skills): their kind's defaults again. default: what every admin, member or client may do. rules: a kind on or off (enabled) and your instructions for them. Every change counts from their next message. Say exactly what changed.",
