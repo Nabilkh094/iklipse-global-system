@@ -107,14 +107,16 @@ printf 'SLACK_CHANNEL=%s\nSLACK_OWNERS=%s\n' '<channel id>' '<Nabil member id>' 
 systemctl restart claude-me-relay
 ```
 
-## The company bot (optional)
+## The company brain (optional)
 
-The group drives the company bot (the whatsapp-bot function, master.ts
-there): `/bot task` is done exactly as if Nabil wrote to the bot privately,
-and the answer comes back here. The bot's OKs come here too (answer
-`yes 1234` or `no`). Workers reach it with `iklipse-bot ask` (reading only)
-and `iklipse-bot do` (waits for Nabil's go in the group). The bot stays on its
-own API key; nobody else reaches Nabil's subscriptions.
+The company brain is the workers' own tool. Nabil says what he wants; the
+worker plans and uses it (the whatsapp-bot function, master.ts there):
+`iklipse-brain ask` only reads, `iklipse-brain do` waits for Nabil's go in the
+group, then runs exactly that text as if he wrote to it privately, and the
+result comes back to the worker. `iklipse-brain tools` prints what it can do,
+from the file the brain writes when it starts. Others' requests that need his
+OK come here too (answer `yes 1234` or `no`). The brain stays on its own API
+key; nobody else reaches Nabil's subscriptions.
 
 One shared secret, the same on both sides. As root on the server:
 
@@ -126,7 +128,7 @@ Put that value in Supabase as the whatsapp-bot function's secret
 `MASTER_SECRET` (Edge Functions > Secrets), then:
 
 ```bash
-install -m 0755 personal/iklipse-bot.mjs /usr/local/bin/iklipse-bot
+install -m 0755 personal/iklipse-brain.mjs /usr/local/bin/iklipse-brain
 printf 'IKLIPSE_BOT_URL=%s
 ' 'https://<project>.supabase.co/functions/v1/whatsapp-bot' >> /etc/claude-me/relay.conf
 systemctl restart claude-me-relay

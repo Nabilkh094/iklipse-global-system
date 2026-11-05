@@ -1,11 +1,11 @@
-// The company bot channel (bot.mjs): signing, tasks in order or together,
-// answers matched to their task, OKs apart, and what Nabil reads built from
-// the bot's words or, without them, its own log.
+// The company brain channel (bot.mjs): signing, answers matched to their task,
+// OKs apart, what a worker reads built from the brain's words or, without
+// them, its own log, and the list of what the brain can do.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { botChannel, doneSteps, isOwnerWord, masterSignature, parseBotRequest, resultText } from "./bot.mjs";
+import { botChannel, brainBrief, brainDetails, doneSteps, goFor, isOwnerWord, masterSignature, resultText } from "./bot.mjs";
 import { nextAt, parseSchedule, sayDays } from "./schedule.mjs";
 
 test("the signature is the bot's: HMAC over master.<seconds>.<body>", () => {
@@ -14,12 +14,42 @@ test("the signature is the bot's: HMAC over master.<seconds>.<body>", () => {
   assert.equal(sig, `t=1700000000,v1=${v}`);
 });
 
-test("a /bot request: one task, a numbered list in order, or together", () => {
-  assert.deepEqual(parseBotRequest("Tell Sara the files are late"), { tasks: ["Tell Sara the files are late"], together: false });
-  assert.deepEqual(parseBotRequest("1. Remind Ali at 5\n2. Post the report in Team"), { tasks: ["Remind Ali at 5", "Post the report in Team"], together: false });
-  assert.deepEqual(parseBotRequest("together\n- Who's off today?\n- Open alerts?"), { tasks: ["Who's off today?", "Open alerts?"], together: true });
-  // A sentence with one list line inside stays one task.
-  assert.equal(parseBotRequest("Send this:\n1. hello").tasks.length, 1);
+test("the brain's tools, as it wrote them: short for the instructions, in full on request", () => {
+  const catalog = {
+    tools: [
+      { name: "search", about: "Search what was said. Only what they may read.", reads: true, takes: [{ name: "text", required: true, about: "What to look for" }, { name: "group", required: false }] },
+      { name: "post_in_group", about: "Post in a group.", reads: false, takes: [] },
+    ],
+    skills: [{ name: "caveman", description: "Short answers" }],
+  };
+  const brief = brainBrief(catalog);
+  assert.match(brief, /- search \(reads\): Search what was said\./);
+  assert.match(brief, /- post_in_group: Post in a group\./);
+  assert.ok(!brief.includes("Only what they may read"));
+  assert.match(brief, /Its skills: caveman\./);
+  const full = brainDetails(catalog);
+  assert.match(full, /text: What to look for/);
+  assert.match(full, /group \(optional\)/);
+  assert.match(full, /caveman: Short answers/);
+  // Not written yet: said, never made up.
+  assert.match(brainBrief(null), /isn't there/);
+  assert.match(brainDetails({ tools: [] }), /isn't there/);
+});
+
+test("a go runs only what it can only mean", () => {
+  const now = 100 * 60_000;
+  const asks = { a: { at: now - 60_000 } };
+  // One waiting: the plain go is for it, or a reply to it.
+  assert.deepEqual(goFor({ asks, now }), { key: "a", pick: false });
+  assert.deepEqual(goFor({ replyKey: "a", asks, now }), { key: "a", pick: false });
+  // A reply to something else is never for it.
+  assert.deepEqual(goFor({ replyKey: "z", asks, now }), { key: null, pick: false });
+  // A plan waits for its go too, or two wait: he picks.
+  assert.deepEqual(goFor({ asks, planWaits: true, now }), { key: null, pick: true });
+  assert.deepEqual(goFor({ asks: { a: asks.a, b: { at: now } }, now }), { key: null, pick: true });
+  // Old, or nothing waiting: not for the brain.
+  assert.deepEqual(goFor({ asks: { a: { at: 0 } }, now }), { key: null, pick: false });
+  assert.deepEqual(goFor({ asks: {}, now }), { key: null, pick: false });
 });
 
 test("only Nabil's own short OK words count, not a sentence with yes in it", () => {
@@ -56,35 +86,20 @@ function fakeBot() {
   return { post, seen, say: (task_id, kind, text) => replies.push({ seq: ++seq, task_id, kind, text }), states };
 }
 
-test("in order: the second task is sent only once the first is over", async () => {
+test("a task's answer is matched to it; without words, what its log shows it did", async () => {
   const f = fakeBot();
   const ch = botChannel({ post: f.post });
-  const done = ch.run(["first", "second"]);
+  const first = ch.send("first");
   await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(f.seen.tasks.map((t) => t.text), ["first"]);
   f.say(f.seen.tasks[0].task_id, "reply", "First done.");
   await ch.tick();
   await ch.tick();
+  assert.equal(resultText(await first), "First done.");
+  const second = ch.send("second");
   await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(f.seen.tasks.map((t) => t.text), ["first", "second"]);
   await ch.tick();
   await ch.tick();
-  const out = await done;
-  assert.equal(out.length, 2);
-  assert.equal(resultText(out[0]), "First done.");
-  // No words from the bot: what its log shows it did.
-  assert.equal(resultText(out[1]), "Done: message_client.");
-});
-
-test("together: all sent at once", async () => {
-  const f = fakeBot();
-  const ch = botChannel({ post: f.post });
-  const done = ch.run(["a", "b", "c"], { together: true });
-  await new Promise((r) => setTimeout(r, 5));
-  assert.equal(f.seen.tasks.length, 3);
-  await ch.tick();
-  await ch.tick();
-  assert.equal((await done).length, 3);
+  assert.equal(resultText(await second), "Done: message_client.");
 });
 
 test("the master's own asks are reading only (auto), and OKs and notices go apart", async () => {

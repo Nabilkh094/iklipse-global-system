@@ -27,20 +27,6 @@ export function masterSignature(secret, body, now = Date.now()) {
  * Lines of a /bot request: "1. ...", "2) ...", "- ..." each its own task;
  * anything else is one task. "together" first: all at once, else in order.
  */
-export function parseBotRequest(arg) {
-  let text = String(arg ?? "").trim();
-  let together = false;
-  const m = /^(together|parallel|مع بعض)\s*[:\n]?\s*/i.exec(text);
-  if (m) {
-    together = true;
-    text = text.slice(m[0].length);
-  }
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const listed = lines.filter((l) => /^(\d+[.)]|[-•*])\s+/.test(l));
-  const tasks = listed.length >= 2 && listed.length === lines.length ? listed.map((l) => l.replace(/^(\d+[.)]|[-•*])\s+/, "")) : text ? [text] : [];
-  return { tasks, together };
-}
-
 /** The tools that actually ran and worked, from the bot's own log (not its words). */
 export function doneSteps(steps = []) {
   return [...new Set(steps.filter((s) => s.outcome === "ok" && !String(s.tool).startsWith("_")).map((s) => s.tool))];
@@ -53,6 +39,38 @@ export function resultText(t) {
   if (t.state === "done") return said.length ? said.join("\n\n") : did.length ? `Done: ${did.join(", ")}.` : "Done.";
   const why = t.error || t.state;
   return [`❌ Not finished (${why}).`, ...said].join("\n\n");
+}
+
+/**
+ * Which waiting request Nabil's go is for. key: that one. pick: it could mean
+ * more than one, so he replies to the one he means. Neither: it isn't for the
+ * brain. A plain go counts only when it can mean nothing else.
+ */
+export function goFor({ replyKey, asks, planWaits, now, within = 30 * 60_000 }) {
+  if (replyKey) return { key: asks[replyKey] ? replyKey : null, pick: false };
+  const fresh = Object.keys(asks).filter((k) => now - (asks[k].at ?? 0) < within);
+  if (fresh.length === 1 && !planWaits) return { key: fresh[0], pick: false };
+  return { key: null, pick: fresh.length > 0 };
+}
+
+/** The brain's tools in short, for a worker's instructions: what it can do, read from what the brain itself wrote. */
+export function brainBrief(catalog) {
+  const tools = catalog?.tools;
+  if (!Array.isArray(tools) || !tools.length) return "The list of the brain's tools isn't there right now: iklipse-brain ask what it can do.";
+  const first = (s) => String(s ?? "").split(/(?<=[.:])\s/)[0].slice(0, 140);
+  const lines = tools.map((t) => `- ${t.name}${t.reads ? " (reads)" : ""}: ${first(t.about)}`);
+  const skills = (catalog.skills ?? []).map((s) => s.name).join(", ");
+  return [`The brain's tools now:\n${lines.join("\n")}`, ...(skills ? [`Its skills: ${skills}.`] : [])].join("\n");
+}
+
+/** Every tool in full, with what it takes (iklipse-brain tools). */
+export function brainDetails(catalog) {
+  const tools = catalog?.tools;
+  if (!Array.isArray(tools) || !tools.length) return "The list of the brain's tools isn't there right now.";
+  const said = (p) => `  ${p.name}${p.required ? "" : " (optional)"}${p.about ? `: ${p.about}` : ""}`;
+  const parts = tools.map((t) => [`${t.name}${t.reads ? " (reads)" : ""}: ${t.about}`, ...(t.takes ?? []).map(said)].join("\n"));
+  const skills = (catalog.skills ?? []).map((s) => `${s.name}: ${s.description ?? ""}`);
+  return [...parts, ...(skills.length ? [`Skills:\n${skills.join("\n")}`] : [])].join("\n\n");
 }
 
 /** Nabil's own OK or no for the bot ("yes 4821", "no", "نعم 4821", "لا"). */
@@ -103,20 +121,6 @@ export function botChannel({ url, secret, fetchImpl = fetch, post, onApproval = 
     return await over;
   };
 
-  /** In order (each after the last is over) or together; resolves with all of them. */
-  const run = async (texts, { together = false, auto = false, each = () => {} } = {}) => {
-    if (together) return await Promise.all(texts.map((x) => send(x, { auto }).then((t) => (each(t), t))));
-    const out = [];
-    for (const x of texts) {
-      const t = await send(x, { auto });
-      each(t);
-      out.push(t);
-      // One failed: the rest wait for Nabil (they may depend on it).
-      if (t.state !== "done") break;
-    }
-    return out;
-  };
-
   /** What the bot said since, and how the open tasks are doing. */
   const tick = async () => {
     const open = [...tasks.values()].filter((t) => !FINAL.has(t.state) && t.state !== "sending");
@@ -153,7 +157,6 @@ export function botChannel({ url, secret, fetchImpl = fetch, post, onApproval = 
 
   return {
     send,
-    run,
     tick,
     /** Nabil's own words for the bot: an OK, a no, stop, start. handled: the bot took them. */
     words: async (text) => (await call("words", { id: randomUUID(), text })).handled === true,
