@@ -173,16 +173,13 @@ export function readerFor(provider, stepOf) {
   };
 }
 
-/** "12.3k" for a token count. */
-const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 
 /** The last line of every answer: who answered, with what, how long, what it cost. */
-export function footer({ provider, model, effort, ms, cost, usage }) {
+// Every worker runs on a subscription: no cost or usage under the answers (/usage has it when asked).
+export function footer({ provider, model, effort, ms }) {
   const secs = Math.round(ms / 1000);
   const time = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
-  // Claude on a subscription reports what the run would cost on the API: shown as that, not as a charge.
-  const spent = typeof cost === "number" ? `~$${cost.toFixed(2)} API value` : usage ? `${k(usage.in)} in / ${k(usage.out)} out` : null;
-  return `_${[PROVIDERS[provider]?.label ?? provider, model || "default model", effort ? `effort ${effort}` : null, time, spent].filter(Boolean).join(" · ")}_`;
+  return `_${[PROVIDERS[provider]?.label ?? provider, model || "default model", effort ? `effort ${effort}` : null, time].filter(Boolean).join(" · ")}_`;
 }
 
 // ------------------------------------------------------------------------ Jev --
