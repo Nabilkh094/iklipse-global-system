@@ -8,7 +8,7 @@ import { defaultSettings, parseAmount, pickProvider, settingsCommand, systemFor,
 import { faultKind, faultsReport, limitState, record, spent, usageReport } from "./usage.mjs";
 import { jsonIn, route, sensitiveByWords, teamMode } from "./router.mjs";
 import { compare, parsePlan, split } from "./team.mjs";
-import { fromSlackEvent } from "./slack.mjs";
+import { fromSlackEvent, slackPoller } from "./slack.mjs";
 
 const LABELS = { claude: "Claude", gpt: "GPT", grok: "Grok" };
 
@@ -177,7 +177,7 @@ test("team split: the central agent's parts run at once and are joined", async (
   assert.deepEqual(one, { fallback: "compare" });
 });
 
-test("Slack: the owner's messages in the channel only", () => {
+test("Slack: the owner's messages in the channel only, read from the channel, answered in it", async () => {
   const opts = { channel: "C1", owners: new Set(["U1"]) };
   assert.deepEqual(fromSlackEvent({ type: "message", channel: "C1", user: "U1", text: "hi", ts: "1730000000.0001" }, opts), {
     id: "1730000000.0001",
@@ -185,10 +185,27 @@ test("Slack: the owner's messages in the channel only", () => {
     timestamp: 1730000000,
     via: "slack",
     from: "U1",
-    ref: "1730000000.0001",
+    ref: null,
     thread: null,
   });
   assert.equal(fromSlackEvent({ type: "message", channel: "C1", user: "U2", text: "x", ts: "1" }, opts), null);
   assert.equal(fromSlackEvent({ type: "message", channel: "C1", user: "U1", bot_id: "B", text: "x", ts: "1" }, opts), null);
-  assert.equal(fromSlackEvent({ type: "message", channel: "C1", user: "U1", text: "x", ts: "2", thread_ts: "1" }, opts).ref, "1");
+
+  const calls = [];
+  const got = [];
+  const history = [{ ts: "1730000003.0", user: "U1", text: "second" }, { ts: "1730000002.0", user: "B0", bot_id: "B0", text: "our answer" }, { ts: "1730000001.0", user: "U1", text: "first" }];
+  const fake = async (url, init) => {
+    calls.push({ url, init });
+    if (url.includes("conversations.history")) return { json: async () => ({ ok: true, messages: calls.length === 1 ? history : [] }) };
+    return { json: async () => ({ ok: true, ts: "1730000009.0" }) };
+  };
+  const poller = slackPoller({ botToken: "xoxb-test", channel: "C1", owners: new Set(["U1"]), onMessage: (m) => got.push(m.body), fetchImpl: fake, now: () => 1730000000000 });
+  await poller.tick();
+  await poller.tick();
+  assert.deepEqual(got, ["first", "second"]);
+  assert.match(calls[0].url, /conversations\.history\?channel=C1&oldest=1730000000\.000000/);
+  assert.match(calls[1].url, /oldest=1730000003\.0/);
+  assert.equal(calls[0].init.headers.Authorization, "Bearer xoxb-test");
+  assert.equal(await poller.say("hello"), "1730000009.0");
+  assert.deepEqual(JSON.parse(calls[2].init.body), { channel: "C1", text: "hello", unfurl_links: false });
 });

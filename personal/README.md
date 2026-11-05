@@ -96,14 +96,13 @@ and fake CLIs, on the server, apart from the real one: `node personal/e2e.server
 
 ## Slack (optional)
 
-A Slack app with Socket Mode on, the bot scopes `chat:write`, `channels:history`
-(and `groups:history` for a private channel), the event `message.channels` (or
-`message.groups`), installed in the workspace and invited to the channel. Then,
-as root:
+The iklipse Slack app the system already has (Alerts > Slack), not a new one.
+It needs one more bot scope, `chat:write` (OAuth & Permissions, then reinstall),
+and an invite to one channel for the agents, left off in Alerts. The relay reads
+that channel every 3 seconds and answers in it. Then, as root:
 
 ```bash
 install -m 600 /dev/null /etc/claude-me/slack-bot.token && read -rs K && printf '%s' "$K" > /etc/claude-me/slack-bot.token && unset K
-install -m 600 /dev/null /etc/claude-me/slack-app.token && read -rs K && printf '%s' "$K" > /etc/claude-me/slack-app.token && unset K
 printf 'SLACK_CHANNEL=%s\nSLACK_OWNERS=%s\n' '<channel id>' '<Nabil member id>' >> /etc/claude-me/relay.conf
 systemctl restart claude-me-relay
 ```

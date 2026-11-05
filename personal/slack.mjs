@@ -1,11 +1,14 @@
-// Slack as a second way into the same chats: one channel, the owner only,
-// through Socket Mode (the relay connects out to Slack; nothing on the server
-// is opened to the internet). Needs a Slack app with a bot token (xoxb-) and
-// an app-level token (xapp-, connections:write), both in root-only files.
+// Slack as a second way into the same chats, through the iklipse Slack app
+// that the system already has (Alerts > Slack): one channel for the agents,
+// the owner's messages only. That app sends its events to the whatsapp-bot
+// function, so the relay doesn't take them over: it reads the channel itself
+// every few seconds (conversations.history) and answers in it (chat.postMessage),
+// with the same bot token, kept in a root-only file. The app needs the
+// chat:write scope for the answers. The agents channel stays off in Alerts.
 
 const API = "https://slack.com/api";
 
-/** A Slack message event as the relay's own message shape, or null when it isn't the owner's in the channel. */
+/** A Slack message as the relay's own message shape, or null when it isn't the owner's in the channel. */
 export function fromSlackEvent(ev, { channel, owners }) {
   if (!ev || ev.type !== "message" || ev.subtype || ev.bot_id) return null;
   if (ev.channel !== channel || !owners.has(String(ev.user))) return null;
@@ -15,59 +18,56 @@ export function fromSlackEvent(ev, { channel, owners }) {
     timestamp: Math.floor(Number(ev.ts)),
     via: "slack",
     from: String(ev.user),
-    ref: String(ev.thread_ts ?? ev.ts),
-    thread: ev.thread_ts ? String(ev.thread_ts) : null,
+    ref: null,
+    thread: null,
   };
 }
 
-export function slackClient({ botToken, appToken, channel, owners, onMessage, log = console }) {
-  const call = async (method, token, body) => {
-    const r = await fetch(`${API}/${method}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(body ?? {}),
+/**
+ * Reads the channel every `everyMs` and hands each new owner message to onMessage, oldest first.
+ * Starts from now: nothing older is taken.
+ */
+export function slackPoller({ botToken, channel, owners, onMessage, log = console, everyMs = 3000, fetchImpl = fetch, now = () => Date.now() }) {
+  let oldest = (now() / 1000).toFixed(6);
+  let timer = null;
+  let busy = false;
+  const call = async (method, params, body) => {
+    const r = await fetchImpl(`${API}/${method}${params ? `?${new URLSearchParams(params)}` : ""}`, {
+      method: body ? "POST" : "GET",
+      headers: { Authorization: `Bearer ${botToken}`, ...(body ? { "Content-Type": "application/json; charset=utf-8" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30000),
     });
     const j = await r.json().catch(() => ({}));
-    if (!j.ok) throw new Error(`Slack ${method}: ${j.error ?? r.status}`);
+    if (!j.ok) throw new Error(`Slack ${method}: ${j.error ?? r.status}${j.needed ? ` (needs ${j.needed})` : ""}`);
     return j;
   };
-
-  let stopped = false;
-  const connect = async () => {
-    while (!stopped) {
-      try {
-        const { url } = await call("apps.connections.open", appToken);
-        await new Promise((closed) => {
-          const ws = new WebSocket(url);
-          ws.onmessage = (e) => {
-            let msg;
-            try {
-              msg = JSON.parse(String(e.data));
-            } catch {
-              return;
-            }
-            if (msg.envelope_id) ws.send(JSON.stringify({ envelope_id: msg.envelope_id }));
-            if (msg.type === "disconnect") ws.close();
-            if (msg.type === "events_api") {
-              const m = fromSlackEvent(msg.payload?.event, { channel, owners });
-              if (m) Promise.resolve(onMessage(m)).catch((err) => log.error("slack message", err.message));
-            }
-          };
-          ws.onclose = () => closed();
-          ws.onerror = () => {};
-        });
-      } catch (e) {
-        log.error("slack", e.message);
-      }
-      if (!stopped) await new Promise((r) => setTimeout(r, 5000));
+  /** One read: the new messages since the last one. */
+  const tick = async () => {
+    const j = await call("conversations.history", { channel, oldest, inclusive: "false", limit: "50" });
+    const msgs = (j.messages ?? []).slice().sort((a, b) => Number(a.ts) - Number(b.ts));
+    for (const msg of msgs) {
+      if (Number(msg.ts) > Number(oldest)) oldest = String(msg.ts);
+      const m = fromSlackEvent({ ...msg, type: msg.type ?? "message", channel }, { channel, owners });
+      if (m) await onMessage(m);
     }
   };
-
   return {
-    start: () => void connect(),
-    stop: () => (stopped = true),
-    /** Posted in the channel, in the thread of ref when given; its ts back. */
-    say: async (text, ref) => (await call("chat.postMessage", botToken, { channel, text, ...(ref ? { thread_ts: ref } : {}), unfurl_links: false })).ts,
+    tick,
+    start() {
+      timer = setInterval(async () => {
+        if (busy) return;
+        busy = true;
+        try {
+          await tick();
+        } catch (e) {
+          log.error("slack", e.message);
+        }
+        busy = false;
+      }, everyMs);
+    },
+    stop: () => clearInterval(timer),
+    /** Posted in the channel; its ts back. */
+    say: async (text) => (await call("chat.postMessage", null, { channel, text, unfurl_links: false })).ts,
   };
 }

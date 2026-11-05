@@ -28,7 +28,7 @@ import { PROVIDERS, argsFor, footer, providerOf, readerFor } from "./agents.mjs"
 import { STATE_RULE, addTurn, approveLast, handoffFor, isApproval, markSeen, mergeState, splitState } from "./chatlog.mjs";
 import { isSensitive, judge, route, teamMode } from "./router.mjs";
 import { SETTINGS_COMMANDS, WORKERS, pickProvider, settingsCommand, systemFor, withDefaults, needsTaskType } from "./settings.mjs";
-import { slackClient } from "./slack.mjs";
+import { slackPoller } from "./slack.mjs";
 import { compare, split } from "./team.mjs";
 import { faultKind, faultsReport, limitState, record, usageReport } from "./usage.mjs";
 
@@ -204,7 +204,6 @@ function main() {
     // Root-only files read by the relay itself; never handed to a worker.
     jevKey: process.env.JEV_KEY_FILE || "/etc/claude-me/jev.key",
     slackBot: process.env.SLACK_BOT_TOKEN_FILE || "/etc/claude-me/slack-bot.token",
-    slackApp: process.env.SLACK_APP_TOKEN_FILE || "/etc/claude-me/slack-app.token",
     slackChannel: process.env.SLACK_CHANNEL || "",
     slackOwners: new Set((process.env.SLACK_OWNERS || "").split(",").map((s) => s.trim()).filter(Boolean)),
     state: join(process.env.STATE_DIRECTORY || "/var/lib/claude-me-relay", "state.json"),
@@ -286,17 +285,18 @@ function main() {
     return r;
   };
 
-  const slackTokens = { bot: readKey(conf.slackBot), app: readKey(conf.slackApp) };
+  // The iklipse Slack app's bot token (the same one as on Alerts > Slack), read here only.
+  const slackBot = readKey(conf.slackBot);
   const slack =
-    slackTokens.bot && slackTokens.app && conf.slackChannel && conf.slackOwners.size
-      ? slackClient({ botToken: slackTokens.bot, appToken: slackTokens.app, channel: conf.slackChannel, owners: conf.slackOwners, onMessage: (m) => take([m]) })
+    slackBot && conf.slackChannel && conf.slackOwners.size
+      ? slackPoller({ botToken: slackBot, channel: conf.slackChannel, owners: conf.slackOwners, onMessage: (m) => take([m]) })
       : null;
 
-  /** Sent where the message came from (WhatsApp, or Slack in its thread); each piece remembered as the chat's. */
+  /** Sent where the message came from (WhatsApp, or the Slack channel); each piece remembered as the chat's. */
   const say = async (text, ref, conv, via = "wa") => {
     for (const [i, p] of pieces(whatsappText(text)).entries()) {
       if (via === "slack" && slack) {
-        const ts = await slack.say(p, ref);
+        const ts = await slack.say(p);
         if (conv && ts) st.sent[ts] = conv.id;
         continue;
       }
@@ -305,7 +305,6 @@ function main() {
       const id = shortId(sent?.id ?? sent?.key?.id ?? "");
       if (conv && id) st.sent[id] = conv.id;
     }
-    if (conv && via === "slack" && ref) st.sent[ref] = conv.id;
     if (conv) save();
   };
   const typing = (on, via) => (via === "slack" ? Promise.resolve() : waha("POST", on ? "/api/startTyping" : "/api/stopTyping", { session: conf.session, chatId: conf.group }).catch(() => {}));
