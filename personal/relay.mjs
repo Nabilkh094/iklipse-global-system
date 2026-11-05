@@ -483,6 +483,8 @@ function main() {
           LOGNAME: conf.user,
           LANG: "C.UTF-8",
           PATH: `${home}/.local/bin:${home}/.grok/bin:/usr/local/bin:/usr/bin:/bin`,
+          // Claude Code compacts a chat by itself at 75% of its model's context (1M for Opus 5.5 and Fable), as on the desktop.
+          CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "75",
           // The company bot through the relay (iklipse-bot): the address and this start's token, never the master key.
           ...(bot ? { IKLIPSE_BOT: `http://127.0.0.1:${conf.botToolPort}`, IKLIPSE_BOT_TOKEN: botToken, IKLIPSE_BOT_RUN: runId } : {}),
         },
