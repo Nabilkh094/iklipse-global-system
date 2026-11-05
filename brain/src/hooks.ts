@@ -10,7 +10,7 @@
 import type { HookCallbackMatcher, HookEvent, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { BotClient } from "./bot.js";
 import type { GitHub } from "./github.js";
-import { bashVerdict, fetchVerdict, isHeld, MCP, OWN_TOOLS, pathVerdict, toolVerdict, type Tier } from "./policy.js";
+import { bashVerdict, fetchVerdict, isHeld, MCP, OWN_TOOLS, pathVerdict, toolVerdict, type Skills, type Tier } from "./policy.js";
 import type { RunRef } from "./tools.js";
 
 const FILE_TOOLS = new Set(["Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit"]);
@@ -28,6 +28,8 @@ const deny = (why: string): HookJSONOutput => ({ hookSpecificOutput: { hookEvent
 
 export function hooksFor(o: {
   tier: Tier;
+  /** Their permissions now (0137); null before it. */
+  skills?: Skills;
   /** The owner or an admin, privately: files, the shell and the brain's own tools (policy.ts devRun). */
   dev?: boolean;
   workdir: string;
@@ -57,7 +59,7 @@ export function hooksFor(o: {
             if (input.hook_event_name !== "PreToolUse") return {};
             const tool = input.tool_name;
             const x = (input.tool_input ?? {}) as Record<string, unknown>;
-            const v = toolVerdict(tool, tier, o.stopped(), o.dev ?? true);
+            const v = toolVerdict(tool, tier, o.stopped(), o.dev ?? true, o.skills);
             if (!v.ok) return refuse(tool, x, v.why);
             if (tool === "Bash") {
               if (x.dangerouslyDisableSandbox === true || x.run_in_background === true) return refuse(tool, x, "Commands run in the sandbox, and in the foreground.");

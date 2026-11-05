@@ -15,7 +15,7 @@ import type { BotClient } from "./bot.js";
 import type { Config } from "./config.js";
 import type { GitHub } from "./github.js";
 import { hooksFor } from "./hooks.js";
-import { allowedToolsFor, builtinsFor, devRun, DISALLOWED, MCP, SERVER_TOOLS, WEB_HOSTS, type Tier } from "./policy.js";
+import { allowedToolsFor, builtinsFor, devRun, DISALLOWED, hiddenToolsFor, MCP, SERVER_TOOLS, WEB_HOSTS, type Tier } from "./policy.js";
 import { listSkills, pluginsFor } from "./skills.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -334,7 +334,10 @@ export class Runner {
 
     const tier: Tier = s.asker.tier;
     // Changing the system (files, shell, GitHub, skills): the owner or an admin, in their private chat only.
-    const staff = devRun(tier, m.where === "private" && m.reply_chat === m.chat_id && !m.chat_id.endsWith("@g.us"));
+    const privately = m.where === "private" && m.reply_chat === m.chat_id && !m.chat_id.endsWith("@g.us");
+    // Their permissions now (0137); null before it (by the tier).
+    const skills = Array.isArray(s.skills) ? s.skills : null;
+    const staff = devRun(tier, privately, skills);
     const key = sessionKey(m);
     const chat = sessions.get(key);
     const v = instructionsVersion(cfg.stateDir, cfg.deployDir);
@@ -362,17 +365,17 @@ export class Runner {
         maxTurns: s.max_turns,
         maxBudgetUsd: s.run_cost_usd,
         cwd: staff ? cfg.workdir : cfg.emptyDir,
-        tools: builtinsFor(tier, staff),
-        allowedTools: allowedToolsFor(tier, staff),
+        tools: builtinsFor(tier, staff, skills),
+        allowedTools: allowedToolsFor(tier, staff, skills),
         // Skills (skills.ts): the repo's, caveman always among them, and the ones added on WhatsApp.
         plugins: pluginsFor(cfg.stateDir),
         skills: "all",
-        disallowedTools: [...DISALLOWED, "Read(//proc/**)", "Read(//sys/**)", "Read(//etc/**)", "Read(//run/**)", "Read(//root/**)", "Read(~/.ssh/**)"],
+        disallowedTools: [...DISALLOWED, ...hiddenToolsFor(tier, staff, skills), "Read(//proc/**)", "Read(//sys/**)", "Read(//etc/**)", "Read(//run/**)", "Read(//root/**)", "Read(~/.ssh/**)"],
         permissionMode: "dontAsk",
         settingSources: [],
         systemPrompt: staff ? { type: "preset", preset: "claude_code", append: runInstructions(s, m, changesText()) } : runInstructions(s, m, changesText()),
         mcpServers: { iklipse: iklipseServer({ bot, run, github: staff ? this.d.github : null, dev: staff, stateDir: cfg.stateDir }) },
-        hooks: hooksFor({ tier, dev: staff, workdir: cfg.workdir, run, bot, github: staff ? this.d.github : null, stopped: () => this.stopped || s.stopped }),
+        hooks: hooksFor({ tier, skills, dev: staff, workdir: cfg.workdir, run, bot, github: staff ? this.d.github : null, stopped: () => this.stopped || s.stopped || s.read_only === true }),
         ...(staff ? { sandbox: sandboxFor(cfg) } : {}),
         env: childEnv(cfg, this.d.proxy),
         ...(p.resume ? { resume: p.resume } : {}),

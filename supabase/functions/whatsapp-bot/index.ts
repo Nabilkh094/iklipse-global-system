@@ -104,6 +104,9 @@ import { toHook, wahaCall, wahaCode, wahaEnsure, wahaInfo, wahaLogout, wahaMisse
 import { lidPhones, linkTeamLids, mentionNamer } from "./timeline.ts";
 import { writeDayNotes } from "./daynotes.ts";
 import { brainEnv, brainOn, brainSettings, clientAsker, closeStale, forward, forwardEdit, ownerSays, reaches, tierOf, toBrainPost } from "./brain.ts";
+import { mayTalk } from "./permissions.ts";
+import { MASTER_CHAT, masterApi, masterOut } from "./master.ts";
+import { runSchedules } from "./schedules.ts";
 import { brainApi, carryOut, type Deps, type SendFile } from "./brain-tools.ts";
 
 const ELEVEN_KEY = env("ELEVEN_API_KEY") || env("ELEVENLABS_API_KEY");
@@ -1032,6 +1035,8 @@ async function fromPrivate(
   db: Db,
   o: { id: string; chatId: string; raw: string; text: string; quotedId: string | null; phone: string; asks: boolean; told?: string | null; lid?: string | null },
 ) {
+  // Blocked by the super admin (permissions.ts, talk off): kept, nothing more.
+  if (await blockedNow(db, { phone: o.told ?? o.phone, lid: o.lid ?? null, chat: o.chatId })) return;
   // "ok" to a repeating reminder is the answer: it stops (reminders.ts).
   const sayer = (await team(db)).byPhone.get(o.phone);
   if (sayer) await ackReminder(db, sayer.id, o.text, o.quotedId).catch((e) => console.error("reminder ack", (e as Error).message));
@@ -1175,6 +1180,11 @@ async function orderNow(
     chatName?: string | null;
   },
 ) {
+  // Blocked by the super admin (permissions.ts, talk off): nothing is taken from them.
+  if (o.told !== undefined && (await blockedNow(db, { phone: o.told ?? o.phone ?? null, lid: o.brainLid ?? o.lid ?? null, chat: o.chatId }))) {
+    await firstTime(db, `order:${o.id}`);
+    return;
+  }
   if (o.told !== undefined && (await brainNow(db, o))) return;
   const [s, cfg, t] = await Promise.all([settings(db), config(db), team(db)]);
   await takeOrder(db, s, t, sendAs(cfg), o, (id) => answerNow(db, id));
@@ -1217,6 +1227,20 @@ async function brainNow(db: Db, o: Parameters<typeof orderNow>[1]): Promise<bool
 }
 
 /**
+ * The super admin turned talking to the bot off for them (permissions.ts):
+ * by their account when they're on the team, else by their number. Never the
+ * super admin. false when the brain isn't set up.
+ */
+async function blockedNow(db: Db, o: { phone: string | null; lid: string | null; chat: string }): Promise<boolean> {
+  const bs = await brainSettings(db);
+  if (!bs) return false;
+  const asker = await tierOf(db, bs, { phone: o.phone, lid: o.lid });
+  if (asker?.tier === "owner") return false;
+  const phone = o.phone ?? (o.chat.endsWith("@c.us") ? o.chat.split("@")[0]! : null);
+  return !(await mayTalk(db, { user: asker?.id ?? null, phone, tier: asker?.tier ?? "client", chat: o.chat }));
+}
+
+/**
  * Who the brain takes a private message from (brain.ts): someone on the team
  * it answers ("team"), anyone else once it's on for clients ("client"), or
  * nobody (null: the old bot, as before).
@@ -1250,6 +1274,8 @@ async function clientBrain(db: Db): Promise<ClientBrain | undefined> {
   const bs = await brainSettings(db);
   if (!bs || !reaches(bs, "client")) return undefined;
   return async (o) => {
+    // Blocked by the super admin: handled, with no answer.
+    if (await blockedNow(db, { phone: o.phone ?? null, lid: null, chat: o.chatId })) return true;
     const c = o.phone ? await clientByPhone(db, o.phone) : null;
     const name = (c?.name_known ? c.name : o.name) || (o.phone ? `+${o.phone}` : "Someone");
     // A try that the brain didn't take is tried again, not taken as done.
@@ -1342,6 +1368,8 @@ async function readFileNow(db: Db, id: string) {
 const sendAs =
   (cfg: Config): Send =>
   async (chatId, said, quotedId, mentions) => {
+    // The master group isn't on WhatsApp: kept for the master to read (master.ts).
+    if (chatId === MASTER_CHAT) return await masterOut(serviceClient(), said, quotedId);
     // Links go out as they are (Calendly's own, not shortened).
     const text = said;
     // The numbers tagged in it ("@2010..."): real tags only when named to WAHA (waha.ts sendTextBody).
@@ -1767,7 +1795,7 @@ async function tick(db: Db) {
   const t0 = Date.now();
   const s = await settings(db);
   if (!s.enabled && !s.mail_enabled && !s.slack_enabled) return { off: true };
-  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, noted: 0, stale: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
+  const out = { synced: 0, analyzed: 0, opened: 0, resolved: 0, clients: 0, named: 0, asked: 0, dms: 0, talks: 0, rang: 0, calls: 0, booked: 0, told: 0, reminded: 0, reminders: 0, scheduled: 0, reports: 0, links: 0, held: 0, orders: 0, files: 0, remembered: 0, noted: 0, stale: 0, searched: 0, caught: 0, mail: null as unknown, slack: null as unknown, busy: [] as string[], errors: [] as string[] };
   const cfg = await config(db);
   const t = await team(db);
 
@@ -1791,6 +1819,8 @@ async function tick(db: Db) {
         }
       },
     },
+    // Scheduled tasks that are due (schedules.ts, 0139): the brain does each as its owner, privately.
+    { name: "schedules", ms: 40_000, run: async (deadline) => void (out.scheduled = await runSchedules(db, deadline)) },
     // Reminders that are due (reminders.ts, 0110), privately: their time was worked out when they were set (working hours included).
     { name: "reminders", ms: 40_000, run: async (deadline) => void (out.reminders = await sendReminders(db, sendAs(cfg), (await directory(db)).team, deadline, s)) },
     ...(s.enabled ? [{ name: "whatsapp", ms: RUN_MS, run: (deadline: number) => whatsappTick(db, s, cfg, t, deadline, out) }] : []),
@@ -1940,6 +1970,12 @@ Deno.serve(async (req) => {
   // The brain's tools (brain-tools.ts), signed by the brain: /whatsapp-bot/brain-tools/<name>.
   const path = new URL(req.url).pathname.split("/").filter(Boolean);
   if (path.at(-2) === "brain-tools") return await brainApi(req, r, () => brainDeps(db));
+  // The super admin's master agent (master.ts), signed with its own secret: /whatsapp-bot/master/<op>.
+  if (path.at(-2) === "master") {
+    return await masterApi(req, r, db, {
+      words: async (o) => await ownerNow(db, { id: o.id, chatId: MASTER_CHAT, phone: o.phone, lid: null, text: o.text, quotedId: null }),
+    });
+  }
 
   if (r === "waha") {
     try {

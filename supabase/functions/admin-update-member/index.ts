@@ -36,6 +36,16 @@ Deno.serve(async (req) => {
       if (body.role && body.role !== "admin") throw new HttpError(400, "You cannot change your own role");
     }
 
+    // The super admin's account is locked (0136): nobody else changes its sign-in, role or state.
+    const { data: sa } = await admin.from("brain_settings").select("super_admin").eq("id", 1).maybeSingle();
+    if (sa?.super_admin && sa.super_admin === body.user_id) {
+      if (body.role !== undefined && body.role !== "admin") throw new HttpError(403, "The super admin's account is locked: its role doesn't change");
+      if (body.is_active === false) throw new HttpError(403, "The super admin's account is locked: it can't be marked as left");
+      if (callerId !== body.user_id && (body.new_password || body.username !== undefined)) {
+        throw new HttpError(403, "The super admin's account is locked: only they change its username or password");
+      }
+    }
+
     // Profile updates.
     const profileUpdate: Record<string, unknown> = {};
     if (body.display_name !== undefined) profileUpdate.display_name = body.display_name;

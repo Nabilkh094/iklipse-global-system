@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, X } from "lucide-react";
+import { Brain, Lock } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Segmented, Switch } from "@/components/ui/Controls";
 import { Select } from "@/components/ui/Select";
@@ -13,12 +13,13 @@ import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useAuth } from "@/lib/auth";
 import { relativeTime } from "@/lib/format";
 import { BrainRuns } from "@/components/alerts/BrainRuns";
-import { BRAIN_MODELS, fetchBrain, saveBrainSettings, type BrainPatch, type BrainPerson, type BrainSettings } from "@/lib/brainApi";
+import { BrainPermissions } from "@/components/alerts/BrainPermissions";
+import { BRAIN_MODELS, fetchBrain, saveBrainSettings, type BrainPatch, type BrainSettings } from "@/lib/brainApi";
 
 // -----------------------------------------------------------------------------
 // Alerts > Brain (admins, 0119, 0120): Claude on the Agent SDK as the bot's
 // one mind on WhatsApp. The kill switch, who it answers (the phase, clients
-// too, and who the super admins are), what happens when it's down, its models and
+// too, and who the one super admin is: locked, changed only by a hand-over), what happens when it's down, its models and
 // limits, what it spent today; and (Runs, BrainRuns.tsx) its runs: who asked what, how it ended, the
 // tools it used and the system changes it made (merges, deploys).
 // -----------------------------------------------------------------------------
@@ -48,16 +49,15 @@ const LIMITS: [keyof Draft, number, number][] = [
 
 const money = (n: number) => `$${Number(n).toFixed(2)}`;
 
-/** What's saved (the super admins in a steady order, so reordering isn't a change). */
+/** What's saved. */
 function patchOf(x: Draft): BrainPatch {
-  return { ...x, owner_users: [...x.owner_users].sort() };
+  return { ...x };
 }
 
 function draftOf(s: BrainSettings): Draft {
   return {
     phase: s.phase,
     fallback_old: s.fallback_old,
-    owner_users: s.owner_users ?? [],
     model_owner: s.model_owner,
     model_member: s.model_member,
     model_fast: s.model_fast,
@@ -71,7 +71,11 @@ function draftOf(s: BrainSettings): Draft {
 
 /** Alerts > Brain: its settings, or its runs (a table across the page). */
 export function BrainTab() {
-  const [view, setView] = useState<"settings" | "runs">("settings");
+  const [view, setView] = useState<"settings" | "runs" | "permissions">("settings");
+  const { profile } = useAuth();
+  const b = useQuery({ queryKey: ["brain"], queryFn: () => fetchBrain(), refetchInterval: 30_000 });
+  // Permissions (0137): shown to the super admin alone.
+  const isSuper = !!profile && b.data?.settings.super_admin === profile.id;
   return (
     <div className="space-y-5">
       <Segmented
@@ -79,10 +83,11 @@ export function BrainTab() {
         options={[
           { value: "settings", label: "Settings" },
           { value: "runs", label: "Runs" },
+          ...(isSuper ? [{ value: "permissions" as const, label: "Permissions" }] : []),
         ]}
         onChange={setView}
       />
-      {view === "runs" ? <BrainRuns /> : <BrainSettingsView />}
+      {view === "runs" ? <BrainRuns /> : view === "permissions" && isSuper ? <BrainPermissions /> : <BrainSettingsView />}
     </div>
   );
 }
@@ -116,7 +121,7 @@ function BrainSettingsView() {
   const s = b.data.settings;
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((x) => (x ? { ...x, [k]: v } : x));
   const people = b.data.people ?? [];
-  const noSuper = d.owner_users.length === 0;
+  const superName = people.find((p) => p.id === s.super_admin)?.name ?? null;
   const bad = LIMITS.find(([k, lo, hi]) => {
     const v = d[k] as number;
     return !Number.isFinite(v) || v < lo || v > hi;
@@ -125,7 +130,7 @@ function BrainSettingsView() {
   const was = patchOf(initial) as Record<string, unknown>;
   const patch = Object.fromEntries(Object.entries(patchOf(d)).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(was[k]))) as BrainPatch;
   const dirty = Object.keys(patch).length > 0;
-  const isSuper = !!profile && (s.owner_users ?? []).includes(profile.id);
+  const isSuper = !!profile && s.super_admin === profile.id;
   const setPhase = async (v: Draft["phase"]) => {
     if (v === 3 && d.phase !== 3) {
       const ok = await confirm({
@@ -165,10 +170,12 @@ function BrainSettingsView() {
         <SettingRow label="If the brain fails, the standard bot replies" htmlFor="brain-fallback" info="Off: when the brain doesn't answer, the person hears it's down for a few minutes (clients' messages wait for it). On: the old bot answers instead, as before the brain.">
           <Switch id="brain-fallback" checked={d.fallback_old} onChange={(v) => set("fallback_old", v)} label="If the brain fails, the standard bot replies" />
         </SettingRow>
-        <SettingRow label="Super admins" stack info="The people the system belongs to: they get the stronger model and the day's spending warnings, and only they change who the super admins are and the brain's skills (on WhatsApp, its settings too). The brain knows them by the WhatsApp numbers on their account (Users page). Who else can have the brain do things is the Admin role; members only ask it questions.">
-          <PeoplePicker people={people} value={d.owner_users} onChange={(v) => set("owner_users", v)} disabled={!isSuper} />
-          {!isSuper && <span className="mt-1 block text-sm text-muted">Only a super admin changes who the super admins are.</span>}
-          {noSuper && <span className="mt-1 block text-sm text-danger">Keep at least one super admin.</span>}
+        <SettingRow label="Super admin" stack info="The one person the system belongs to. There is only ever one. Their account can't be removed, turned off or lowered, and their WhatsApp numbers can't be taken off by anyone else. They alone set what everyone may have the bot do (bot permissions). It changes only by a hand-over in the database, never from here.">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-inset px-3 h-8 text-sm text-ink">
+            <Lock size={14} className="text-muted" />
+            {superName ?? (s.super_admin ? "Someone not on the team" : "Not set")}
+            {isSuper && <span className="text-muted">(you)</span>}
+          </span>
         </SettingRow>
       </SettingGroup>
 
@@ -194,7 +201,7 @@ function BrainSettingsView() {
       </div>
 
       <div className="sticky bottom-0 mt-8 -mx-3 sm:-mx-4 md:-mx-6 border-t border-border bg-bg/95 backdrop-blur px-3 sm:px-4 md:px-6 py-3 flex flex-wrap items-center gap-3">
-        <Button variant="primary" disabled={!dirty || !!bad || noSuper} loading={save.isPending} onClick={() => save.mutate(patch)}>
+        <Button variant="primary" disabled={!dirty || !!bad} loading={save.isPending} onClick={() => save.mutate(patch)}>
           Save settings
         </Button>
         {dirty && (
@@ -204,35 +211,6 @@ function BrainSettingsView() {
         )}
         {bad ? <span className="text-sm text-danger">Check the limits.</span> : dirty && <span className="text-sm text-muted">Unsaved changes</span>}
       </div>
-    </div>
-  );
-}
-
-/** People picked: one chip each (x takes them off), and a menu to add someone. */
-function PeoplePicker({ people, value, onChange, disabled }: { people: BrainPerson[]; value: string[]; onChange: (v: string[]) => void; disabled?: boolean }) {
-  const byId = new Map(people.map((p) => [p.id, p]));
-  const rest = people.filter((p) => !value.includes(p.id));
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {value.map((id) => (
-        <span key={id} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-inset pl-3 pr-1 h-8 text-sm text-ink">
-          {byId.get(id)?.name ?? "Someone who left"}
-          <button type="button" disabled={disabled} aria-label={`Remove ${byId.get(id)?.name ?? "them"}`} className="grid place-items-center h-6 w-6 rounded-full text-muted hover:bg-border/70 hover:text-ink disabled:opacity-40 disabled:pointer-events-none" onClick={() => onChange(value.filter((x) => x !== id))}>
-            <X size={14} />
-          </button>
-        </span>
-      ))}
-      {rest.length > 0 && !disabled && (
-        <Select
-          size="sm"
-          className="w-48"
-          aria-label="Add a super admin"
-          value=""
-          placeholder="Add a person"
-          onChange={(id) => id && onChange([...value, id])}
-          options={rest.map((p) => ({ value: p.id, label: p.role === "admin" ? `${p.name} (admin)` : p.name }))}
-        />
-      )}
     </div>
   );
 }

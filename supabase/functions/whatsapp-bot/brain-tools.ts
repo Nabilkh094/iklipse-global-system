@@ -35,6 +35,9 @@ import { setReport } from "./report.ts";
 import { fileNameOf, linkTo, markdownOf, transcribe } from "./transcript.ts";
 import { loadTaught, numbered, taughtNotes, teachFrom } from "./notes.ts";
 import { asThem, boardCall, boardTools, BoardsRefused } from "./boards.ts";
+import { applyChange, kindOf, kindRules, overviewOf, skillNames, skillsFor } from "./permissions.ts";
+import { MASTER_CHAT } from "./master-env.ts";
+import { addSchedule, nextRun, sayRule, schedulesOf } from "./schedules.ts";
 import {
   bookMeetingCapability,
   closeAlertCapability,
@@ -58,6 +61,7 @@ import {
   sha256,
   signedBy,
   tierNow,
+  ownerChats,
   toBrainPost,
   type Asker,
   type BrainEnv,
@@ -90,8 +94,10 @@ interface Run {
   request: string | null;
   quoted_id: string | null;
   created_at: string;
+  /** How it came: "private", "mention"..., or from the master (master.ts): "master", "master-auto". */
+  via?: string | null;
 }
-const RUN_COLS = "id, message_id, chat_id, reply_chat, asker, asker_name, tier, status, request, quoted_id, created_at";
+const RUN_COLS = "id, message_id, chat_id, reply_chat, asker, asker_name, tier, status, request, quoted_id, created_at, via";
 
 /** A run's tools work this long after it came in (the longest run is 60 minutes). */
 const RUN_LIFE_MS = 90 * MIN;
@@ -110,6 +116,8 @@ interface Ctx {
   by: Person;
   /** Where what's done is said: the run's chat, as a reply when that's where it was asked. */
   at: { chat_id: string; message_id: string | null };
+  /** What they may have the bot do now, here (permissions.ts); null: before 0137, by the tiers. */
+  skills: Set<string> | null;
 }
 
 /** Said back to the brain as the tool's error: nothing was done. maybeDone: it may have been. */
@@ -186,7 +194,7 @@ async function ctxOf(d: Deps, run: Run): Promise<Ctx> {
     if (member && !member.guest) throw new Refuse("They're on the team.");
     const who = await whoIs(d.db, phone, run.asker_name);
     const asker = clientAsker(run.reply_chat, { id: who.person.kind === "client" ? who.person.id : null, name: who.label });
-    const dir = await dirNow();
+    const [dir, skills] = await Promise.all([dirNow(), skillsFor(d.db, { user: null, phone, tier: "client", chat: run.chat_id })]);
     return {
       d,
       run,
@@ -198,6 +206,7 @@ async function ctxOf(d: Deps, run: Run): Promise<Ctx> {
       names: new Map(),
       by: { id: "", name: who.label, username: "", active: false, admin: false },
       at: { chat_id: run.reply_chat, message_id: run.message_id },
+      skills,
     };
   }
   const asker = run.asker ? await tierNow(d.db, brain, run.asker) : null;
@@ -207,7 +216,7 @@ async function ctxOf(d: Deps, run: Run): Promise<Ctx> {
   if (!me) throw new Refuse("They can't use iklipse.");
   // The owner reads as an admin does; their mail stays theirs.
   if (asker.tier === "owner") me.admin = true;
-  const dir = await dirNow();
+  const [dir, skills] = await Promise.all([dirNow(), skillsFor(d.db, { user: asker.id, phone: phoneOfChat(run.reply_chat), tier: asker.tier, chat: run.chat_id })]);
   const names = new Map([...dir.team.entries()].map(([id, a]) => [id, a.name]));
   const by: Person = d.t.people.get(asker.id) ?? { id: asker.id, name: asker.name, username: "", active: true, admin: asker.admin };
   return {
@@ -220,7 +229,8 @@ async function ctxOf(d: Deps, run: Run): Promise<Ctx> {
     dir,
     names,
     by: { ...by, admin: asker.admin || asker.tier === "owner" },
-    at: { chat_id: run.reply_chat, message_id: run.reply_chat === run.chat_id ? run.message_id : null },
+    at: { chat_id: run.reply_chat, message_id: run.reply_chat === run.chat_id && !run.message_id.startsWith("schedule:") ? run.message_id : null },
+    skills,
   };
 }
 
@@ -876,8 +886,8 @@ export const TOOLS: Record<string, Spec> = {
         const tool = (await boardTools(token)).find((t) => t.name === name);
         if (!tool) throw new Refuse(`There's no board tool ${name} (boards_tools lists them).`);
         if (c.brain.stopped && !tool.readOnly) throw new Refuse("The brain is stopped: it only reads until an admin says start.");
-        // Changing a board is doing something: an admin's to ask for; the team reads.
-        if (!c.by.admin && !tool.readOnly) throw new Refuse("Only an admin can ask me to change a board. You can ask me what's on it.");
+        // Changing a board is doing something (boards_change; before 0137 an admin's); the team reads.
+        if (!(c.skills ? c.skills.has("boards_change") : c.by.admin) && !tool.readOnly) throw new Refuse("You don't have permission to change boards (the super admin can give it). You can ask me what's on them.");
         const r = await boardCall(token, name, args);
         if (r.error) throw new Refuse(r.text || "The board tool said no.");
         return { result: r.text };
@@ -1068,7 +1078,102 @@ export const TOOLS: Record<string, Spec> = {
       return { said: `Changed: ${patchText(patch)}.` };
     },
   },
+  // Scheduled tasks (0139, schedules.ts): theirs, run as them each time.
+  schedule: {
+    tiers: ADMINS,
+    write: true,
+    run: async (x, c) => {
+      const action = str(x.action) || "list";
+      const list = await schedulesOf(c.d.db, c.asker.id);
+      const zone = c.dir.team.get(c.asker.id)?.zone ?? TZ;
+      const line = (s: (typeof list)[number], i: number) => `${i + 1}. ${s.text.slice(0, 120)}: ${sayRule(s)}${s.enabled ? (s.next_at ? `, next ${s.next_at}` : "") : " (off)"}`;
+      if (action === "list") return { said: list.length ? list.map(line).join("\n") : "No scheduled tasks." };
+      if (action === "add") {
+        try {
+          const s = await addSchedule(c.d.db, c.asker.id, {
+            text: str(x.text),
+            every: str(x.every) as "once" | "day" | "weekdays" | "week" | "month",
+            days: Array.isArray(x.days) ? (x.days as unknown[]).map(Number) : [],
+            at: str(x.at),
+            on_date: str(x.on_date) || null,
+            zone,
+          });
+          return { said: `Scheduled: ${s.text.slice(0, 120)}, ${sayRule(s)}. Next: ${s.next_at}.` };
+        } catch (e) {
+          throw new Refuse(`Not scheduled: ${(e as Error).message}`);
+        }
+      }
+      const n = Number(x.number);
+      const s = list[n - 1];
+      if (!s) throw new Refuse("Which one (its number from list)?");
+      if (action === "stop") {
+        await c.d.db.from("brain_schedule").delete().eq("id", s.id);
+        return { said: `Removed: ${s.text.slice(0, 120)}.` };
+      }
+      if (action === "pause" || action === "resume") {
+        const next = action === "resume" ? nextRun(s) : null;
+        await c.d.db.from("brain_schedule").update({ enabled: action === "resume" && next !== null, ...(next ? { next_at: iso(next) } : {}) }).eq("id", s.id);
+        return { said: action === "pause" ? `Paused: ${s.text.slice(0, 120)}.` : `On again: ${s.text.slice(0, 120)}, next ${next ? iso(next) : "never"}.` };
+      }
+      throw new Refuse("action: list, add, stop, pause or resume.");
+    },
+  },
+  // Who may have the bot do what (0137): the super admin's alone, never given to anyone.
+  permissions: {
+    tiers: OWNER,
+    write: false,
+    run: async (x, c) => await permissionsTool(c, x),
+  },
 };
+
+/** The super admin's permissions tool: see, give, take, reset, block, defaults, a kind's rules. */
+async function permissionsTool(c: Ctx, x: Record<string, unknown>) {
+  if (c.asker.tier !== "owner" || (c.brain.super_admin && c.brain.super_admin !== c.asker.id)) throw new Refuse("Permissions are the super admin's alone.");
+  const action = str(x.action) || "list";
+  const db = c.d.db;
+  if (action === "list") return await overviewOf(db);
+  if (c.brain.stopped) throw new Refuse("The brain is stopped: it only reads until the super admin says start.");
+  // Who: someone on the team by profile.id, or anyone by their number.
+  const who = (): { user_id?: string; phone?: string } => {
+    const id = str(x.member);
+    if (id) return { user_id: id };
+    const phone = str(x.phone).replace(/\D/g, "");
+    if (phone) return { phone };
+    throw new Refuse("Who: member (profile.id) or phone (their WhatsApp number).");
+  };
+  const skills = (Array.isArray(x.skills) ? x.skills : str(x.skill) ? [x.skill] : []).map((v) => str(v)).filter(Boolean);
+  const chats = Array.isArray(x.only_in) ? (x.only_in as unknown[]).map((v) => str(v)).filter(Boolean) : undefined;
+  const note = str(x.note) || undefined;
+  const kind = str(x.kind) as "admin" | "member" | "client";
+  const kindOk = ["admin", "member", "client"].includes(kind);
+  let said = "";
+  try {
+    if (action === "give" || action === "take") {
+      if (!skills.length) throw new Refuse("Which skills (keys from list)?");
+      for (const skill of skills) await applyChange(db, { op: "grant", ...who(), skill, allowed: action === "give", chats, note });
+      said = `${action === "give" ? "Given" : "Taken"}: ${skills.join(", ")}${chats?.length ? ` (only in ${chats.join(", ")})` : ""}.`;
+    } else if (action === "block" || action === "unblock") {
+      await applyChange(db, action === "block" ? { op: "grant", ...who(), skill: "talk", allowed: false, note } : { op: "reset", ...who(), skill: "talk" });
+      said = action === "block" ? "Blocked: the bot ignores them." : "Unblocked.";
+    } else if (action === "reset") {
+      if (skills.length) for (const skill of skills) await applyChange(db, { op: "reset", ...who(), skill });
+      else await applyChange(db, { op: "reset", ...who() });
+      said = skills.length ? `Back to their kind's defaults: ${skills.join(", ")}.` : "All their own grants removed: their kind's defaults again.";
+    } else if (action === "default") {
+      if (!kindOk || !skills.length || typeof x.allowed !== "boolean") throw new Refuse("A default needs kind (admin, member, client), skills and allowed.");
+      for (const skill of skills) await applyChange(db, { op: "default", kind, skill, allowed: x.allowed });
+      said = `Every ${kind} ${x.allowed ? "may" : "may not"} now: ${skills.join(", ")}.`;
+    } else if (action === "rules") {
+      if (!kindOk) throw new Refuse("Rules need kind (admin, member, client).");
+      await applyChange(db, { op: "rules", kind, ...(typeof x.enabled === "boolean" ? { enabled: x.enabled } : {}), ...(typeof x.instructions === "string" ? { instructions: x.instructions } : {}) });
+      said = `Rules for ${kind} changed${typeof x.enabled === "boolean" ? (x.enabled ? " (on)." : " (off: the bot doesn't answer them).") : "."}`;
+    } else throw new Refuse("action: list, give, take, block, unblock, reset, default or rules.");
+  } catch (e) {
+    if (e instanceof Refuse) throw e;
+    throw new Refuse(`Not changed: ${(e as Error).message}`);
+  }
+  return { said };
+}
 
 /**
  * Someone on the team, as the Users page changes them: role, left or back,
@@ -1191,12 +1296,19 @@ export async function callTool(d: Deps, name: string, p: Record<string, unknown>
   const actor = run.tier === "client" ? clientKey(run.reply_chat) : run.asker;
   if (!actor || str(p.acting_as) !== actor) throw new Refuse("That run is someone else's.");
   const c = await ctxOf(d, run);
-  if (!spec.tiers.includes(c.asker.tier)) {
+  // Their permissions now (0137), checked here whatever the brain thought; before 0137, the tiers.
+  if (c.skills && !c.skills.has(name)) {
+    const label = (await skillNames(d.db)).get(name) ?? name;
+    throw new Refuse(c.asker.tier === "client" ? "That isn't something I can do for you." : `They don't have permission for that (${label}). Only the super admin can give it.`);
+  }
+  if (!c.skills && !spec.tiers.includes(c.asker.tier)) {
     // Asking the brain to do something is an admin's: the team asks it questions.
     throw new Refuse(c.asker.tier === "member" ? "Only an admin can ask me to do that. You can ask me anything, though." : `${name} isn't for ${c.asker.tier === "client" ? "clients" : "admins"}.`);
   }
   const x = (p.input && typeof p.input === "object" ? p.input : {}) as Record<string, unknown>;
   if (spec.write && c.brain.stopped) throw new Refuse("The brain is stopped: it only reads until an admin says start.");
+  // The master asked by itself (master.ts): it only reads; doing anything waits for the super admin's go.
+  if (spec.write && run.via === "master-auto") throw new Refuse("Asked by the master by itself: reading only. Doing this needs the super admin's go.");
   // Mentioned in a client group: only what's about the people in it.
   if (spec.write) await clientGroupGate(c, name, x);
   try {
@@ -1431,9 +1543,16 @@ async function control(d: Deps, name: string, p: Record<string, unknown>) {
       // OKs decided for this chat in the last day: the brain knows what came of them.
       const { data: oks } = await db.from("brain_approval").select("what, status, result, done_at").eq("chat_id", run.reply_chat).gt("created_at", iso(Date.now() - 24 * 60 * MIN)).neq("status", "waiting").order("created_at").limit(10);
       const where = run.chat_id.endsWith("@g.us") ? await db.from("wa_group").select("name, kind").eq("chat_id", run.chat_id).maybeSingle() : { data: null };
+      const rules = await kindRules(db, kindOf(c.asker.tier));
       return {
         asker: { id: c.asker.id, name: c.asker.name, tier: c.asker.tier, admin: c.asker.admin, zone: (client ? c.who?.person.zone : c.dir.team.get(c.asker.id)?.zone) ?? TZ },
+        // What they may have the bot do now (0137): the brain offers only these; null before 0137.
+        skills: c.skills ? [...c.skills] : null,
+        // The super admin's own instructions for their kind (0137), said with the message.
+        rules: c.asker.tier === "owner" ? "" : rules.instructions,
         stopped: c.brain.stopped,
+        // The master asked by itself (master.ts): reading only.
+        read_only: run.via === "master-auto",
         model,
         model_fast: c.brain.model_fast,
         max_turns: owner ? c.brain.max_turns : c.brain.member_turns,
@@ -1465,7 +1584,8 @@ ${WHO_IS_WHO}`,
       if (Date.now() - Date.parse(run.created_at) > RUN_LIFE_MS) throw new Refuse("This run is over.");
       const text = str(p.text).slice(0, 4000);
       if (!text) throw new Refuse("Nothing to say.");
-      const quote = p.quote !== false && run.reply_chat === run.chat_id ? run.message_id : null;
+      // A scheduled task's run answers no message of theirs (schedules.ts): nothing quoted.
+      const quote = p.quote !== false && run.reply_chat === run.chat_id && !run.message_id.startsWith("schedule:") ? run.message_id : null;
       if (run.tier === "client") {
         // To a client, only what's theirs (guard.ts), as the bot's own replies always were: caught, they hear
         // we're checking, and the team gets the reply to OK or change.
@@ -1491,7 +1611,8 @@ ${WHO_IS_WHO}`,
           return { held: true };
         }
       }
-      return { id: await d.send(run.reply_chat, text, quote) };
+      // To the master group: always as the task's own reply (master.ts), however it was quoted.
+      return { id: await d.send(run.reply_chat, text, run.reply_chat === MASTER_CHAT ? run.message_id : quote) };
     }
     case "_step": {
       const run = await runOf(db, p.run_id, false);
@@ -1597,7 +1718,7 @@ async function spendWatch(d: Deps) {
         pct === 100
           ? `The brain spent $${spent.toFixed(2)} today, its daily limit ($${b.day_cost_usd}). It answers nobody until tomorrow, or until the limit is raised (Alerts > Brain).`
           : `The brain spent $${spent.toFixed(2)} today, 80% of its daily limit ($${b.day_cost_usd}).`;
-      for (const p of b.owner_phones) await d.send(`${p}@c.us`, text).catch(() => null);
+      for (const chat of ownerChats(b)) await d.send(chat, text).catch(() => null);
     }
     break;
   }
