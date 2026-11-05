@@ -33,7 +33,7 @@ number. Separate from the bot and the brain: those stay on the API key.
 ```bash
 useradd -m -s /bin/bash claude-me && mkdir -p /home/claude-me/work && chown -R claude-me: /home/claude-me/work
 npm install -g @anthropic-ai/claude-code
-install -d -m 0755 /opt/claude-me && install -m 0644 personal/{relay,agents,bot,chatlog,router,settings,slack,team,usage}.mjs /opt/claude-me/
+install -d -m 0755 /opt/claude-me && install -m 0644 personal/{relay,agents,bot,chatlog,router,schedule,settings,slack,team,usage}.mjs /opt/claude-me/
 install -d -m 0700 /etc/claude-me
 grep ^WAHA_API_KEY= /opt/waha/.env | cut -d= -f2- > /etc/claude-me/waha.key && chmod 600 /etc/claude-me/waha.key
 printf 'GROUP=%s\nOWNERS=%s\n' '<group id>@g.us' '<lid>@lid,<number>@c.us' > /etc/claude-me/relay.conf

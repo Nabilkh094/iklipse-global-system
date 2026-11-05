@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { botChannel, doneSteps, isOwnerWord, masterSignature, parseBotRequest, resultText } from "./bot.mjs";
+import { nextAt, parseSchedule, sayDays } from "./schedule.mjs";
 
 test("the signature is the bot's: HMAC over master.<seconds>.<body>", () => {
   const sig = masterSignature("s".repeat(40), '{"a":1}', 1_700_000_000_000);
@@ -124,6 +125,21 @@ test("a task the bot never picks up times out", async () => {
   clock = 5000;
   await ch.tick();
   assert.equal((await t).state, "timeout");
+});
+
+test("/schedule: every day, working days, some weekdays; Cairo time", () => {
+  assert.deepEqual(parseSchedule("every day 9:00 summarize my mail"), { op: "add", days: "day", at: "09:00", text: "summarize my mail" });
+  assert.deepEqual(parseSchedule("sun,wed 10:30 plan the week"), { op: "add", days: [0, 3], at: "10:30", text: "plan the week" });
+  assert.equal(parseSchedule("weekdays 08:00 news").days, "weekdays");
+  assert.deepEqual(parseSchedule("off 2"), { op: "off", n: 2 });
+  assert.equal(parseSchedule("someday 10:00 x").op, "help");
+  assert.equal(parseSchedule("day 25:00 x").op, "help");
+  const cairo = (x) => Date.parse(`${x}+02:00`);
+  const s = { days: "weekdays", at: "10:00", zone: "Africa/Cairo" };
+  // Thursday 5 Nov 2026, after 10: Sunday 8 Nov at 10.
+  assert.equal(nextAt(s, cairo("2026-11-05T11:00:00")), cairo("2026-11-08T10:00:00"));
+  assert.equal(nextAt({ ...s, days: "day" }, cairo("2026-11-05T09:00:00")), cairo("2026-11-05T10:00:00"));
+  assert.equal(sayDays({ days: [0, 3], at: "10:30" }), "Sun, Wed at 10:30");
 });
 
 test("done steps: only tools that worked, not the bot's own plumbing", () => {

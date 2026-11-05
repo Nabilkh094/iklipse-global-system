@@ -33,6 +33,7 @@ import { slackPoller } from "./slack.mjs";
 import { compare, split } from "./team.mjs";
 import { faultKind, faultsReport, limitState, record, usageReport } from "./usage.mjs";
 import { botChannel, isOwnerWord, parseBotRequest, resultText } from "./bot.mjs";
+import { nextAt, parseSchedule, sayDays } from "./schedule.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -88,6 +89,7 @@ const COMMANDS = new Set([
   ...["undo", "auto", "dry", "team", "run", "approve", "task", "usage", "faults", "force"],
   ...["instructions", "language", "tone", "autonomy", "guardrails", "workflows", "memory", "default", "limits", "central", "settings"],
   "bot",
+  "schedule",
 ]);
 
 /** {name, arg} for one of the relay's commands, or null for a request. */
@@ -173,6 +175,10 @@ const HELP = [
   "*Usage*",
   "/usage · /faults · /limits · /force runs what a limit held",
   "",
+  "*Scheduled* (for you; for the team, ask the bot: /bot every Sunday at 10 ...)",
+  "/schedule every day 09:00 request · weekdays 08:30 · sun,wed 10:00",
+  "/schedule list · /schedule off number",
+  "",
   "*The company bot* (it does it as if you wrote to it privately)",
   "/bot task · several: one per line (1. 2. ...), in order; start with together for all at once",
   "/bot stop · /bot start the bot's own switch",
@@ -255,7 +261,7 @@ function main() {
   // ------------------------------------------------------------ what's kept --
 
   /** Where reading got to, the chats, the current one, which chat each answer was; settings, usage. */
-  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {}, settings: null, settingsHistory: [], usage: [], warned: {}, held: null, botAfter: 0, botSent: {}, botAsks: {}, botOks: {} };
+  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {}, settings: null, settingsHistory: [], usage: [], warned: {}, held: null, botAfter: 0, botSent: {}, botAsks: {}, botOks: {}, schedules: [] };
   try {
     st = { ...st, ...JSON.parse(readFileSync(conf.state, "utf8")) };
   } catch {}
@@ -867,6 +873,24 @@ function main() {
         void bot.run(tasks, { together, each: (t) => void botResult(t, ref, tasks.length > 1) });
         return;
       }
+      case "schedule": {
+        const x = parseSchedule(arg);
+        st.schedules ??= [];
+        if (x.op === "list") return reply(st.schedules.length ? st.schedules.map((s, i) => `${i + 1}. ${sayDays(s)}: ${s.text.slice(0, 80)}`).join("\n") : "Nothing scheduled.");
+        if (x.op === "off") {
+          const s = st.schedules[x.n - 1];
+          if (!s) return reply("No such one (/schedule list).");
+          st.schedules.splice(x.n - 1, 1);
+          save();
+          return reply(`✅ Removed: ${s.text.slice(0, 80)}`);
+        }
+        if (x.op === "help") return reply("/schedule every day 09:00 request · weekdays 08:30 request · sun,wed 10:00 request · list · off number (Cairo time)");
+        const s = { id: `s${Date.now()}`, days: x.days, at: x.at, zone: "Africa/Cairo", text: x.text, conv: null };
+        s.next = nextAt(s);
+        st.schedules.push(s);
+        save();
+        return reply(`✅ Scheduled ${sayDays(s)} (Cairo): ${s.text.slice(0, 80)}`);
+      }
       case "usage":
         return reply(usageReport(st.usage, LABELS, st.settings));
       case "faults":
@@ -1042,6 +1066,24 @@ function main() {
   save();
   slack?.start();
   botTool?.listen(conf.botToolPort, "127.0.0.1");
+  // Nabil's scheduled requests: each in its own chat, which stays out of his way (not made the current one).
+  setInterval(() => {
+    const now = Date.now();
+    for (const s of st.schedules ?? []) {
+      if (!s.next || s.next > now) continue;
+      s.next = nextAt(s, now + 60 * SEC);
+      let c = s.conv ? st.convs[s.conv] : null;
+      if (!c) {
+        const keep = st.cur;
+        c = newConv(work, `⏰ ${s.text.slice(0, 30)}`);
+        st.cur = keep;
+        s.conv = c.id;
+      }
+      save();
+      waiting.push({ conv: c, m: { id: null, ref: null, via: "wa", from: [...conf.owners][0] ?? "", body: s.text }, text: `[Scheduled, ${sayDays(s)}]\n${s.text}`, plan: false });
+      drain();
+    }
+  }, 30 * SEC);
   // What the bot said: often while a task is open, else now and then (its OKs and notices).
   let botBusy = false;
   let botLast = 0;
