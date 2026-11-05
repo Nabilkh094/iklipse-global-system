@@ -1553,6 +1553,8 @@ async function control(d: Deps, name: string, p: Record<string, unknown>) {
         stopped: c.brain.stopped,
         // The master asked by itself (master.ts): reading only.
         read_only: run.via === "master-auto",
+        // Sent only after the super admin's go to this exact text (personal/relay.mjs): this message only.
+        from_master: run.via === "master",
         model,
         model_fast: c.brain.model_fast,
         max_turns: owner ? c.brain.max_turns : c.brain.member_turns,

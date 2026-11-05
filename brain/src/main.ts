@@ -2,7 +2,7 @@
 // non-root user. The secrets are read and taken out of the environment
 // first (config.ts); the Anthropic key stays behind the local proxy.
 
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { carryOut } from "./approvals.js";
 import { botClient } from "./bot.js";
@@ -13,6 +13,8 @@ import { keyProxy } from "./proxy.js";
 import { Runner } from "./run.js";
 import { brainServer } from "./server.js";
 import { Sessions } from "./sessions.js";
+import { listSkills } from "./skills.js";
+import { toolCatalog } from "./tools.js";
 
 const cfg = loadConfig();
 const log = (e: Record<string, unknown>) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e }));
@@ -25,6 +27,12 @@ const bot = botClient({ url: cfg.botUrl, secret: cfg.secret });
 const github: GitHub | null = cfg.githubToken
   ? { token: cfg.githubToken, repo: cfg.repo, workdir: cfg.workdir, deployDir: cfg.deployDir, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(cfg.stateDir, "home"), LANG: "C.UTF-8" } }
   : null;
+// What the brain can do, for the master on this server (personal/relay.mjs reads it for every run).
+try {
+  writeFileSync(join(cfg.stateDir, "tools.json"), JSON.stringify({ tools: toolCatalog(), skills: listSkills(cfg.stateDir) }));
+} catch (e) {
+  log({ ev: "brain.tools_list", error: (e as Error).message });
+}
 const runner = new Runner({ cfg, bot, sessions: new Sessions(join(cfg.stateDir, "sessions.json")), github, proxy, log });
 
 // The kill switch as it is now (the function keeps it).

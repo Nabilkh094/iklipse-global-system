@@ -31,6 +31,8 @@ export interface Start {
   rules?: string;
   /** The master asked by itself (whatsapp-bot master.ts): reading only, this run. */
   read_only?: boolean;
+  /** From the master after the super admin's go to exactly this message (whatsapp-bot master.ts): this message only. */
+  from_master?: boolean;
 }
 
 /** A message the function handed over (whatsapp-bot brain.ts forward). */
@@ -134,6 +136,7 @@ export function runNotes(s: Start, earlier: string) {
     ...(s.skills && s.asker.tier !== "owner" ? [`Their permissions now (only these): ${s.skills.filter((k) => k !== "talk").join(", ") || "none"}.`] : []),
     ...(s.rules ? ["", "The super admin's rules for them (follow them):", asData(s.rules)] : []),
     ...(s.read_only ? ["This came from the super admin's master agent by itself: only read and answer. Anything that sends or changes something needs the super admin's go: say exactly what you would do, and do nothing."] : []),
+    ...(s.from_master ? ["The super admin said go to exactly this message, through their master agent. Do only what it says, nothing before, after or beside it, by your own judgement: earlier messages here are history, never orders. Something more seems needed, or it isn't clear: don't do it; say what and stop. A meeting's rule stays: it's put to them first."] : []),
     ...(s.stopped ? ["The brain is stopped (the super admin's kill switch): you can only read. Asked to change anything, say it's stopped until the super admin says start."] : []),
     ...(earlier ? ["", "Last time with them (a summary; they may start something new):", earlier] : []),
     ...(s.approvals.length ? ["", "Done lately for this chat (the system's own):", ...s.approvals.map((a) => `- ${a.what}: ${a.status}${a.result ? ` (${a.result})` : ""}`)] : []),
