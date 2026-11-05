@@ -929,6 +929,7 @@ function main() {
         save();
         return reply(`✅ Effort in #${conv.n}: ${conv.effort ?? "the default"}`, conv);
       case "plan":
+        if (/^off$/i.test(arg)) return reply("Plan mode is off. /plan then a request makes one plan.");
         if (!arg) return reply("/plan then your request");
         waiting.push({ conv, m, text: await words({ ...m, body: arg }), plan: true });
         return drain();
