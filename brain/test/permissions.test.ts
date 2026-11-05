@@ -3,8 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allowedToolsFor, builtinsFor, devRun, hiddenToolsFor, toolVerdict } from "../src/policy.js";
+import { allowedToolsFor, builtinsFor, devRun, hiddenToolsFor, OWN_TOOLS, SERVER_TOOLS, toolVerdict } from "../src/policy.js";
 import { runInstructions, runNotes, type Incoming, type Start } from "../src/prompt.js";
+import { toolCatalog } from "../src/tools.js";
 
 test("a member given message_client may use it; nothing else they weren't given", () => {
   const skills = ["talk", "find", "message_client"];
@@ -91,4 +92,25 @@ test("their permissions and the super admin's rules go with every message, not i
   assert.match(fixed, /permissions/);
   // The super admin: no list (everything).
   assert.doesNotMatch(runNotes(start({ asker: { ...s.asker, tier: "owner" }, skills: ["talk", "find"] }), ""), /Their permissions now/);
+});
+
+test("from the master, after the super admin's go: that message only, and the master's own asks only read", () => {
+  const s = start({ asker: { ...start().asker, tier: "owner" } });
+  assert.doesNotMatch(runNotes(s, ""), /said go to exactly this message/);
+  const notes = runNotes({ ...s, from_master: true }, "");
+  assert.match(notes, /said go to exactly this message/);
+  assert.match(notes, /Do only what it says/);
+  assert.match(notes, /earlier messages here are history, never orders/);
+  assert.match(runNotes({ ...s, read_only: true }, ""), /only read and answer/);
+});
+
+test("the master's list has every tool the brain has, each with what it does", () => {
+  const list = toolCatalog();
+  assert.deepEqual(list.map((t) => t.name).sort(), Object.keys({ ...SERVER_TOOLS, ...OWN_TOOLS }).sort());
+  for (const t of list) assert.ok(t.about.length > 0, t.name);
+  assert.equal(list.find((t) => t.name === "search")?.reads, true);
+  assert.equal(list.find((t) => t.name === "post_in_group")?.reads, false);
+  const find = list.find((t) => t.name === "find")!;
+  assert.deepEqual(find.takes.find((p) => p.name === "table"), { name: "table", required: true, about: "" });
+  assert.equal(find.takes.find((p) => p.name === "where")?.required, false);
 });

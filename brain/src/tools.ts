@@ -357,6 +357,21 @@ const LOCAL = new Set(["skills_list", "skill_add", "skill_remove"]);
  * the brain's own (GitHub, skills) only in a dev run (the owner or an admin,
  * privately).
  */
+/**
+ * Everything the brain can do, as its own tools say it: main.ts writes this
+ * where the master reads it, so a new tool is known the moment it's deployed.
+ */
+export function toolCatalog() {
+  const list = (defs: Record<string, { about: string; shape: Record<string, any> }>, rules: Record<string, { readOnly: boolean }>) =>
+    Object.entries(defs).map(([name, d]) => ({
+      name,
+      about: d.about,
+      reads: rules[name]?.readOnly ?? false,
+      takes: Object.entries(d.shape).map(([k, v]) => ({ name: k, required: !v.isOptional(), about: v.description ?? "" })),
+    }));
+  return [...list(SERVER, SERVER_TOOLS), ...list(OWN, OWN_TOOLS)];
+}
+
 export function iklipseServer(o: { bot: BotClient; run: RunRef; github: GitHub | null; dev?: boolean; stateDir?: string }) {
   const { bot, run, github } = o;
   const dev = o.dev ?? true;
