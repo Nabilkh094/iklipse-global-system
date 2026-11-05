@@ -135,26 +135,25 @@ export function readerFor(provider, stepOf) {
       if (ev.type === "turn.failed") r.error = String(ev.error?.message ?? "failed");
       if (ev.type === "error") r.error = String(ev.message ?? "failed");
     },
-    // Grok's streaming events aren't documented field by field yet: read
-    // them loosely, and check against real output once Nabil has signed in.
+    // grok 1.0.70, checked on a real run: {"type":"text","data":"…"} pieces of
+    // the answer, {"type":"usage"}, then {"type":"end","sessionId","stopReason",
+    // "usage","modelUsage":{"<model>":{…}}}; "available_commands" lists tools.
+    // Tool and error events weren't in that run: read them loosely.
     grok(ev) {
-      const id = ev.session_id ?? ev.sessionId ?? ev.session?.id;
-      if (id) r.session = String(id);
-      if (ev.model && !r.model) r.model = String(ev.model);
       const type = String(ev.type ?? "");
-      if (/tool/i.test(type)) {
-        const name = ev.name ?? ev.tool ?? ev.tool_name ?? ev.toolName;
+      if (type === "text" && typeof ev.data === "string") r.parts.push(ev.data);
+      if (type === "end") {
+        if (ev.sessionId) r.session = String(ev.sessionId);
+        const models = Object.keys(ev.modelUsage ?? {});
+        if (models.length) r.model = models[0];
+        if (ev.usage) r.usage = { in: ev.usage.input_tokens ?? 0, out: ev.usage.output_tokens ?? 0 };
+        if (ev.stopReason && !/end_turn|stop|max_turns/.test(ev.stopReason) && !r.parts.length) r.error = String(ev.stopReason);
+      }
+      if (/tool/i.test(type) && type !== "available_commands") {
+        const name = ev.name ?? ev.tool ?? ev.data?.name ?? ev.data?.tool ?? ev.toolName;
         if (name) r.step = String(name);
       }
-      if (type === "error" || ev.error) r.error = String(ev.message ?? ev.error?.message ?? ev.error ?? "failed");
-      if (/^(result|final|done|complete)/i.test(type)) {
-        const t = ev.result ?? ev.text ?? ev.content ?? ev.message;
-        if (typeof t === "string") r.text = t;
-        if (ev.usage) r.usage = { in: ev.usage.input_tokens ?? ev.usage.prompt_tokens ?? 0, out: ev.usage.output_tokens ?? ev.usage.completion_tokens ?? 0 };
-      } else if (/(text|delta|message)/i.test(type)) {
-        const t = ev.delta ?? ev.text ?? ev.content;
-        if (typeof t === "string") r.parts.push(t);
-      }
+      if (type === "error") r.error = String(ev.message ?? ev.data?.message ?? ev.data ?? ev.error ?? "failed");
     },
   }[provider];
   return {

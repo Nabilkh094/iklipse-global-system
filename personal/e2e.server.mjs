@@ -35,8 +35,9 @@ fake("claude", `  console.log(JSON.stringify({ type: "system", subtype: "init", 
 fake("codex", `  console.log(JSON.stringify({ type: "thread.started", thread_id: "gpt-1" }));
   console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: said("gpt") + state } }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5000, output_tokens: 300 } }));`);
-fake("grok", `  console.log(JSON.stringify({ type: "session", session_id: "grok-1", model: "grok-build" }));
-  console.log(JSON.stringify({ type: "result", result: said("grok") + state, usage: { input_tokens: 4000, output_tokens: 200 } }));`);
+fake("grok", `  console.log(JSON.stringify({ type: "available_commands", tools: ["read_file"] }));
+  console.log(JSON.stringify({ type: "text", data: said("grok") + state }));
+  console.log(JSON.stringify({ type: "end", stopReason: "end_turn", sessionId: "grok-1", usage: { input_tokens: 4000, output_tokens: 200 }, modelUsage: { "grok-build": {} } }));`);
 
 // The fake WAHA: the group's messages come from \`inbox\`; what the relay sends lands in \`outbox\`.
 const inbox = [];

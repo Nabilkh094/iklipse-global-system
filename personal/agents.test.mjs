@@ -66,13 +66,19 @@ test("GPT's answer from codex's events, its thread, tokens and failures", () => 
   assert.equal(feedAll("gpt", [{ type: "thread.started", thread_id: "t" }, { type: "turn.failed", error: { message: "usage limit reached" } }]).result().error, "usage limit reached");
 });
 
-test("Grok's answer, read loosely until real output is checked", () => {
-  const r = feedAll("grok", [{ type: "session", session_id: "g-7", model: "grok-build" }, { type: "text_delta", delta: "Hel" }, { type: "text_delta", delta: "lo" }, { type: "tool_call", name: "bash" }]);
-  assert.equal(r.step, "bash");
-  assert.equal(r.result().text, "Hello");
-  assert.equal(r.result().session, "g-7");
-  assert.equal(feedAll("grok", [{ type: "text_delta", delta: "draft" }, { type: "result", result: "Final." }]).result().text, "Final.");
+test("Grok's answer, from the events of a real grok 1.0.70 run", () => {
+  const r = feedAll("grok", [
+    { type: "available_commands", tools: ["run_terminal_command", "read_file"] },
+    { type: "text", data: "O" },
+    { type: "tool_call", name: "run_terminal_command" },
+    { type: "text", data: "K" },
+    { type: "usage", usage: { input_tokens: 6429, output_tokens: 26 } },
+    { type: "end", stopReason: "end_turn", sessionId: "01a1a908", usage: { input_tokens: 6429, output_tokens: 26 }, modelUsage: { "grok-4.7-build": { costUSD: 0.018 } } },
+  ]);
+  assert.equal(r.step, "run_terminal_command");
+  assert.deepEqual(r.result(), { text: "OK", session: "01a1a908", model: "grok-4.7-build", cost: null, usage: { in: 6429, out: 26 }, error: null });
   assert.equal(feedAll("grok", [{ type: "error", message: "not logged in" }]).result().error, "not logged in");
+  assert.equal(feedAll("grok", [{ type: "end", stopReason: "rate_limited", sessionId: "s" }]).result().error, "rate_limited");
 });
 
 test("every answer's last line: who, which model, effort, time", () => {
