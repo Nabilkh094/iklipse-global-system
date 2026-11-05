@@ -20,6 +20,7 @@ Environment=CLAUDE_BIN=/usr/local/bin/claude
 Environment=CODEX_BIN=/usr/local/bin/codex
 Environment=GROK_BIN=/home/claude-me/.grok/bin/grok
 Environment=JEV_KEY_FILE=/etc/claude-me/jev.key
+Environment=MASTER_KEY_FILE=/etc/claude-me/master.key
 EnvironmentFile=/etc/claude-me/relay.conf
 LoadCredential=waha.key:/etc/claude-me/waha.key
 StateDirectory=claude-me-relay

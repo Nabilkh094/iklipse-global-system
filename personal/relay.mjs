@@ -20,7 +20,8 @@
 // keys are root-only files read here and never reach a worker.
 
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { createServer } from "node:http";
 import { chownSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -31,6 +32,7 @@ import { SETTINGS_COMMANDS, WORKERS, pickProvider, settingsCommand, systemFor, w
 import { slackPoller } from "./slack.mjs";
 import { compare, split } from "./team.mjs";
 import { faultKind, faultsReport, limitState, record, usageReport } from "./usage.mjs";
+import { botChannel, isOwnerWord, parseBotRequest, resultText } from "./bot.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -85,6 +87,7 @@ const COMMANDS = new Set([
   ...["help", "new", "clear", "chats", "switch", "resume", "rename", "cd", "model", "effort", "plan", "status", "stop", "use", "logins"],
   ...["undo", "auto", "dry", "team", "run", "approve", "task", "usage", "faults", "force"],
   ...["instructions", "language", "tone", "autonomy", "guardrails", "workflows", "memory", "default", "limits", "central", "settings"],
+  "bot",
 ]);
 
 /** {name, arg} for one of the relay's commands, or null for a request. */
@@ -170,6 +173,11 @@ const HELP = [
   "*Usage*",
   "/usage · /faults · /limits · /force runs what a limit held",
   "",
+  "*The company bot* (it does it as if you wrote to it privately)",
+  "/bot task · several: one per line (1. 2. ...), in order; start with together for all at once",
+  "/bot stop · /bot start the bot's own switch",
+  "Its OKs come here: answer yes 1234 or no. Reply to its answer to go on with it.",
+  "",
   "Reply to an answer to go on in that chat. Voice notes are written out; photos and files are saved in the inbox. Any other /command (a skill) goes to the worker as it is.",
 ].join("\n");
 
@@ -183,6 +191,14 @@ const BASE = [
   "Nothing you write to disk reaches him by itself: to give him a file, put it on his Google Drive (or GitHub for code) and send the link.",
   "His code lives on GitHub; images and videos go to his Google Drive.",
   STATE_RULE,
+].join(" ");
+
+/** Told to the workers once the company bot is connected (bot.mjs). */
+const BOT_RULE = [
+  "The company's own bot (iklipse, on WhatsApp, with the team's tools) can be asked from your shell:",
+  '`iklipse-bot ask "question"` only reads (who is on the team, orders, clients, meetings, alerts, what was said) and prints its answer;',
+  '`iklipse-bot do "request"` (messages to people, reminders, meetings, posts, changes) asks Nabil for his go in the group first, then the bot does it.',
+  "Use what it answers as facts; never say the bot did something unless its answer says so. At most a few asks per request.",
 ].join(" ");
 
 const LABELS = { claude: "Claude", gpt: "GPT", grok: "Grok" };
@@ -206,6 +222,10 @@ function main() {
     slackBot: process.env.SLACK_BOT_TOKEN_FILE || "/etc/claude-me/slack-bot.token",
     slackChannel: process.env.SLACK_CHANNEL || "",
     slackOwners: new Set((process.env.SLACK_OWNERS || "").split(",").map((s) => s.trim()).filter(Boolean)),
+    // The company bot (bot.mjs): its address and the master key (root-only).
+    botUrl: (process.env.IKLIPSE_BOT_URL || "").replace(/\/+$/, ""),
+    botKey: process.env.MASTER_KEY_FILE || "/etc/claude-me/master.key",
+    botToolPort: Number(process.env.BOT_TOOL_PORT || 39200),
     state: join(process.env.STATE_DIRECTORY || "/var/lib/claude-me-relay", "state.json"),
     maxRun: Number(process.env.MAX_RUN_MIN || 60) * MIN,
     parallel: Number(process.env.MAX_PARALLEL || 3),
@@ -235,7 +255,7 @@ function main() {
   // ------------------------------------------------------------ what's kept --
 
   /** Where reading got to, the chats, the current one, which chat each answer was; settings, usage. */
-  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {}, settings: null, settingsHistory: [], usage: [], warned: {}, held: null };
+  let st = { since: Math.floor(Date.now() / SEC), seen: [], convs: {}, cur: null, n: 0, sent: {}, settings: null, settingsHistory: [], usage: [], warned: {}, held: null, botAfter: 0, botSent: {}, botAsks: {}, botOks: {} };
   try {
     st = { ...st, ...JSON.parse(readFileSync(conf.state, "utf8")) };
   } catch {}
@@ -257,6 +277,10 @@ function main() {
     const sent = Object.entries(st.sent);
     if (sent.length > 600) st.sent = Object.fromEntries(sent.slice(-600));
     st.settingsHistory = st.settingsHistory.slice(-50);
+    for (const k of ["botSent", "botAsks", "botOks"]) {
+      const e = Object.entries(st[k] ?? {});
+      if (e.length > 200) st[k] = Object.fromEntries(e.slice(-200));
+    }
     writeFileSync(`${conf.state}.new`, JSON.stringify(st));
     renameSync(`${conf.state}.new`, conf.state);
   };
@@ -294,6 +318,7 @@ function main() {
 
   /** Sent where the message came from (WhatsApp, or the Slack channel); each piece remembered as the chat's. */
   const say = async (text, ref, conv, via = "wa") => {
+    const ids = [];
     for (const [i, p] of pieces(whatsappText(text)).entries()) {
       if (via === "slack" && slack) {
         const ts = await slack.say(p);
@@ -303,10 +328,39 @@ function main() {
       const r = await waha("POST", "/api/sendText", { session: conf.session, chatId: conf.group, text: p, linkPreview: false, ...(i === 0 && ref ? { reply_to: ref } : {}) });
       const sent = await r.json().catch(() => null);
       const id = shortId(sent?.id ?? sent?.key?.id ?? "");
+      if (id) ids.push(id);
       if (conv && id) st.sent[id] = conv.id;
     }
     if (conv) save();
+    return ids;
   };
+
+  // ------------------------------------------------------- the company bot --
+
+  const masterKey = readKey(conf.botKey);
+  /** Said in the group as the bot's: each piece remembered, so a reply to it goes on with the bot. */
+  const sayBot = async (text, ref, task) => {
+    const ids = await say(text, ref, null).catch(() => []);
+    for (const id of ids) st.botSent[id] = { text: text.slice(0, 3000), task: task ?? null };
+    save();
+  };
+  const bot =
+    conf.botUrl && masterKey
+      ? botChannel({
+          url: conf.botUrl,
+          secret: masterKey,
+          // An OK the bot needs: Nabil answers it himself, here ("yes 1234", or a reply to it).
+          onApproval: async (x) => {
+            const ids = await say(`🔐 ${x.text}`, null, null).catch(() => []);
+            for (const id of ids) st.botOks[id] = Date.now();
+            save();
+          },
+          onNotice: async (x) => await sayBot(`🤖 ${x.text}`, null),
+        })
+      : null;
+  if (bot) bot.after = st.botAfter;
+  /** A task's answer, in the group. */
+  const botResult = (t, ref, many) => sayBot(`${many ? `*${t.text.slice(0, 80)}*\n` : ""}${resultText(t)}\n_iklipse bot_`, ref, t.id);
   const typing = (on, via) => (via === "slack" ? Promise.resolve() : waha("POST", on ? "/api/startTyping" : "/api/stopTyping", { session: conf.session, chatId: conf.group }).catch(() => {}));
 
   // ------------------------------------------------------- what they send --
@@ -398,7 +452,7 @@ function main() {
       if (!existsSync(conf.bins[provider])) return finish({ failed: `${label(provider)} isn't installed on the server yet` });
       if (provider !== "claude" && !PROVIDERS[provider].login(home)) return finish({ failed: `${label(provider)} isn't signed in yet. On the server: sudo -iu ${conf.user} ${PROVIDERS[provider].signIn}` });
       const session = fresh ? null : (holder.sessions?.[provider] ?? null);
-      const system = systemFor(st.settings, provider, BASE);
+      const system = systemFor(st.settings, provider, bot ? `${BASE} ${BOT_RULE}` : BASE);
       // Codex has no system-prompt flag: the instructions open its session, and come again when they changed.
       const sysv = createHash("sha1").update(system).digest("hex").slice(0, 12);
       const tell = provider === "gpt" && (!session || holder.sysv?.gpt !== sysv);
@@ -408,7 +462,15 @@ function main() {
         cwd: holder.cwd,
         uid,
         gid,
-        env: { HOME: home, USER: conf.user, LOGNAME: conf.user, LANG: "C.UTF-8", PATH: `${home}/.local/bin:${home}/.grok/bin:/usr/local/bin:/usr/bin:/bin` },
+        env: {
+          HOME: home,
+          USER: conf.user,
+          LOGNAME: conf.user,
+          LANG: "C.UTF-8",
+          PATH: `${home}/.local/bin:${home}/.grok/bin:/usr/local/bin:/usr/bin:/bin`,
+          // The company bot through the relay (iklipse-bot): the address and this start's token, never the master key.
+          ...(bot ? { IKLIPSE_BOT: `http://127.0.0.1:${conf.botToolPort}`, IKLIPSE_BOT_TOKEN: botToken, IKLIPSE_BOT_RUN: runId } : {}),
+        },
         stdio: ["pipe", "pipe", "pipe"],
       });
       const reader = readerFor(provider, stepOf);
@@ -792,8 +854,18 @@ function main() {
             }),
             line("Jev (router)", l.jev, "no key yet (/etc/claude-me/jev.key)"),
             line("Slack", Boolean(slack), "not set up"),
+            line("Company bot", Boolean(bot), "not connected (IKLIPSE_BOT_URL, master.key)"),
           ].join("\n"),
         );
+      }
+      case "bot": {
+        if (!bot) return reply("The company bot isn't connected yet (IKLIPSE_BOT_URL and /etc/claude-me/master.key on the server).");
+        if (/^(stop|start)$/i.test(arg)) return (await bot.words(arg.toLowerCase())) ? undefined : reply("The bot didn't take it.");
+        const { tasks, together } = parseBotRequest(arg);
+        if (!tasks.length) return reply("/bot then the task. Several: one per line (1. 2. ...), in order; start with together for all at once.");
+        await reply(tasks.length > 1 ? `⏳ ${tasks.length} tasks to the bot, ${together ? "together" : "in order"}.` : "⏳ Sent to the bot.");
+        void bot.run(tasks, { together, each: (t) => void botResult(t, ref, tasks.length > 1) });
+        return;
       }
       case "usage":
         return reply(usageReport(st.usage, LABELS, st.settings));
@@ -847,10 +919,83 @@ function main() {
 
   // ------------------------------------------------------------------- loop --
 
+  /**
+   * What in Nabil's message is for the company bot: his OK or no to one of
+   * its OKs (with its code, or a reply to it), his go to what a worker wanted
+   * the bot to do, or a reply to one of the bot's answers (it goes on there).
+   * true: taken.
+   */
+  const toBot = async (m) => {
+    const replyKey = m.via === "slack" ? m.thread : m.replyTo?.id ? shortId(m.replyTo.id) : null;
+    const body = String(m.body ?? "").trim();
+    const ref = m.ref ?? m.id;
+    // His own words, typed by him: never a worker's.
+    if (isOwnerWord(body) && (/\d{4}/.test(body) || (replyKey && st.botOks[replyKey]))) {
+      if (await bot.words(body)) return true;
+    }
+    const asked = replyKey ? st.botAsks[replyKey] : null;
+    if (asked && isApproval(body)) {
+      delete st.botAsks[replyKey];
+      save();
+      void bot.send(asked.text).then((t) => botResult(t, ref, false));
+      await say("⏳ Sent to the bot.", ref, null).catch(() => {});
+      return true;
+    }
+    const was = replyKey ? st.botSent[replyKey] : null;
+    if (was && body && !commandOf(body)) {
+      void bot.send(body, { quoted: was.text }).then((t) => botResult(t, ref, false));
+      return true;
+    }
+    return false;
+  };
+
+  // The workers' way to the bot (iklipse-bot): only on this server, with this start's token.
+  const botToken = randomBytes(24).toString("hex");
+  const asksBy = new Map();
+  const botTool =
+    bot &&
+    createServer((req, res) => {
+      const out = (code, body) => {
+        res.writeHead(code, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      if (req.method !== "POST" || req.headers.authorization !== `Bearer ${botToken}`) return out(403, { error: "no" });
+      let raw = "";
+      req.on("data", (c) => {
+        if (raw.length < 20000) raw += c;
+      });
+      req.on("end", async () => {
+        try {
+          const x = JSON.parse(raw || "{}");
+          const text = String(x.text ?? "").trim().slice(0, 4000);
+          const runId = String(x.run ?? "");
+          if (!text) return out(400, { error: "nothing asked" });
+          // A few per request: never a loop between the master and the bot.
+          const n = (asksBy.get(runId) ?? 0) + 1;
+          asksBy.set(runId, n);
+          if (n > 6) return out(429, { error: "Enough asks for this request: answer Nabil with what you have, or ask him." });
+          if (req.url === "/ask") {
+            const t = await bot.send(text, { auto: true });
+            return out(200, { ok: t.state === "done", state: t.state, answer: resultText(t) });
+          }
+          if (req.url === "/do") {
+            const ids = await say(`🤖 The master wants the company bot to:\n${text}\n\nReply *go* to this message to send it.`, null, null);
+            for (const id of ids) st.botAsks[id] = { text, at: Date.now() };
+            save();
+            return out(200, { ok: true, waiting: true, answer: "Asked Nabil for his go in the group; it's sent to the bot once he says go. Tell him that." });
+          }
+          return out(404, { error: "ask or do" });
+        } catch (e) {
+          return out(500, { error: e.message });
+        }
+      });
+    });
+
   /** New messages from either side, oldest first: commands at once, requests to the queue. */
   const take = async (fresh) => {
     for (const m of fresh) {
       try {
+        if (bot && (await toBot(m))) continue;
         const c = commandOf(m.body);
         if (c) {
           await command(c, m);
@@ -896,7 +1041,27 @@ function main() {
   }
   save();
   slack?.start();
-  console.log(JSON.stringify({ ev: "relay.start", group: conf.group, owners: conf.owners.size, convs: Object.keys(st.convs).length, slack: Boolean(slack), logins: logins() }));
+  botTool?.listen(conf.botToolPort, "127.0.0.1");
+  // What the bot said: often while a task is open, else now and then (its OKs and notices).
+  let botBusy = false;
+  let botLast = 0;
+  if (bot)
+    setInterval(async () => {
+      if (botBusy || (!bot.open().length && Date.now() - botLast < 15 * SEC)) return;
+      botBusy = true;
+      botLast = Date.now();
+      try {
+        await bot.tick();
+        if (bot.after !== st.botAfter) {
+          st.botAfter = bot.after;
+          save();
+        }
+      } catch (e) {
+        console.error("relay bot", e.message);
+      }
+      botBusy = false;
+    }, 3 * SEC);
+  console.log(JSON.stringify({ ev: "relay.start", group: conf.group, owners: conf.owners.size, convs: Object.keys(st.convs).length, slack: Boolean(slack), bot: Boolean(bot), logins: logins() }));
   let polling = false;
   setInterval(async () => {
     if (polling) return;

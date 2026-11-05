@@ -33,7 +33,7 @@ number. Separate from the bot and the brain: those stay on the API key.
 ```bash
 useradd -m -s /bin/bash claude-me && mkdir -p /home/claude-me/work && chown -R claude-me: /home/claude-me/work
 npm install -g @anthropic-ai/claude-code
-install -d -m 0755 /opt/claude-me && install -m 0644 personal/{relay,agents,chatlog,router,settings,slack,team,usage}.mjs /opt/claude-me/
+install -d -m 0755 /opt/claude-me && install -m 0644 personal/{relay,agents,bot,chatlog,router,settings,slack,team,usage}.mjs /opt/claude-me/
 install -d -m 0700 /etc/claude-me
 grep ^WAHA_API_KEY= /opt/waha/.env | cut -d= -f2- > /etc/claude-me/waha.key && chmod 600 /etc/claude-me/waha.key
 printf 'GROUP=%s\nOWNERS=%s\n' '<group id>@g.us' '<lid>@lid,<number>@c.us' > /etc/claude-me/relay.conf
@@ -106,5 +106,32 @@ install -m 600 /dev/null /etc/claude-me/slack-bot.token && read -rs K && printf 
 printf 'SLACK_CHANNEL=%s\nSLACK_OWNERS=%s\n' '<channel id>' '<Nabil member id>' >> /etc/claude-me/relay.conf
 systemctl restart claude-me-relay
 ```
+
+## The company bot (optional)
+
+The group drives the company bot (the whatsapp-bot function, master.ts
+there): `/bot task` is done exactly as if Nabil wrote to the bot privately,
+and the answer comes back here. The bot's OKs come here too (answer
+`yes 1234` or `no`). Workers reach it with `iklipse-bot ask` (reading only)
+and `iklipse-bot do` (waits for Nabil's go in the group). The bot stays on its
+own API key; nobody else reaches Nabil's subscriptions.
+
+One shared secret, the same on both sides. As root on the server:
+
+```bash
+install -m 600 /dev/null /etc/claude-me/master.key && openssl rand -hex 32 > /etc/claude-me/master.key && cat /etc/claude-me/master.key
+```
+
+Put that value in Supabase as the whatsapp-bot function's secret
+`MASTER_SECRET` (Edge Functions > Secrets), then:
+
+```bash
+install -m 0755 personal/iklipse-bot.mjs /usr/local/bin/iklipse-bot
+printf 'IKLIPSE_BOT_URL=%s
+' 'https://<project>.supabase.co/functions/v1/whatsapp-bot' >> /etc/claude-me/relay.conf
+systemctl restart claude-me-relay
+```
+
+`/logins` shows "Company bot" once it's connected.
 
 Logs: `journalctl -u claude-me-relay -f`.
