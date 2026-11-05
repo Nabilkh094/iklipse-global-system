@@ -118,7 +118,8 @@ export function readerFor(provider, stepOf) {
       }
       if (ev.type === "result") {
         if (typeof ev.total_cost_usd === "number") r.cost = ev.total_cost_usd;
-        if (ev.usage) r.usage = { in: ev.usage.input_tokens ?? 0, out: ev.usage.output_tokens ?? 0 };
+        // Everything the run read counts, the cached part too: that's what uses the subscription.
+        if (ev.usage) r.usage = { in: (ev.usage.input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0) + (ev.usage.cache_read_input_tokens ?? 0), out: ev.usage.output_tokens ?? 0 };
         if (!r.model && ev.modelUsage) r.model = Object.keys(ev.modelUsage)[0] ?? null;
         if (ev.is_error || typeof ev.result !== "string") r.error = String(ev.result ?? ev.subtype ?? "failed");
         else r.text = ev.result;
@@ -146,7 +147,7 @@ export function readerFor(provider, stepOf) {
         if (ev.sessionId) r.session = String(ev.sessionId);
         const models = Object.keys(ev.modelUsage ?? {});
         if (models.length) r.model = models[0];
-        if (ev.usage) r.usage = { in: ev.usage.input_tokens ?? 0, out: ev.usage.output_tokens ?? 0 };
+        if (ev.usage) r.usage = { in: (ev.usage.input_tokens ?? 0) + (ev.usage.cache_read_input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0), out: ev.usage.output_tokens ?? 0 };
         if (ev.stopReason && !/end_turn|stop|max_turns/.test(ev.stopReason) && !r.parts.length) r.error = String(ev.stopReason);
       }
       if (/tool/i.test(type) && type !== "available_commands") {

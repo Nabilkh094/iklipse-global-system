@@ -77,14 +77,15 @@ test("T5: settings change without code, and every worker's instructions follow t
   apply("default", "research grok");
   apply("default", "workflow site gpt");
   apply("limits", "gpt week 2m");
-  apply("limits", "claude day $5");
+  apply("limits", "claude day 500k");
+  assert.match(apply("limits", "grok day $5"), /tokens/);
   apply("limits", "pause grok");
   assert.equal(s.language, "Arabic");
   assert.equal(s.autonomy, "ask-all");
   assert.deepEqual(s.workflows.site, { steps: ["research", "plan", "build", "check"], provider: "gpt" });
   assert.equal(s.defaults.taskType.research, "grok");
   assert.deepEqual(s.limits.gpt.week, { tokens: 2000000 });
-  assert.deepEqual(s.limits.claude.day, { usd: 5 });
+  assert.deepEqual(s.limits.claude.day, { tokens: 500000 });
   assert.deepEqual(s.paused, ["grok"]);
   const sys = systemFor(s, "gpt", "BASE");
   assert.match(sys, /in Arabic/);
@@ -119,7 +120,8 @@ test("T7: usage, faults, and the limits at 80% and 100%", () => {
   assert.equal(faultKind("You've hit your usage limit"), "limit reached");
   assert.equal(faultKind("GPT isn't signed in yet"), "signed out");
   assert.equal(faultKind("stopped (it took too long)"), "timed out");
-  assert.match(usageReport(log, LABELS, s, now), /GPT: 950k · 950k · 950k · OVER week limit/);
+  assert.match(usageReport(log, LABELS, s, now), /GPT: 2 runs \/ 950k tokens · 2 runs \/ 950k tokens · 2 runs \/ 950k tokens · OVER week limit/);
+  assert.ok(!usageReport(log, LABELS, s, now).includes("$"));
   assert.match(faultsReport(log, LABELS), /GPT: limit reached/);
 });
 

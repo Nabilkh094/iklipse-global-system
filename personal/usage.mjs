@@ -63,22 +63,20 @@ export function limitState(settings, log, provider, now = Date.now()) {
   return worst;
 }
 
-const money = (n) => `$${n.toFixed(2)}`;
 const toks = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
-/** /usage: each provider for the day, the week and the month. */
+/** /usage: each worker for the day, the week and the month, in runs and tokens. All are subscriptions: no money shown. */
 export function usageReport(log, labels, settings, now = Date.now()) {
   const lines = ["*Usage* (last 24h · 7 days · 30 days)"];
   for (const [p, label] of Object.entries(labels)) {
     const cells = ["day", "week", "month"].map((period) => {
       const s = spent(log, p, period, now);
-      return s.runs ? `${s.usd ? money(s.usd) : ""}${s.usd && s.tokens ? " / " : ""}${s.tokens ? toks(s.tokens) : ""}${!s.usd && !s.tokens ? `${s.runs} runs` : ""}` : "-";
+      return s.runs ? `${s.runs} runs${s.tokens ? ` / ${toks(s.tokens)} tokens` : ""}` : "-";
     });
     const lim = limitState(settings, log, p, now);
     const flag = lim.level === "paused" ? " · PAUSED" : lim.level === "over" ? ` · OVER ${lim.period} limit` : lim.level === "warn" ? ` · ${Math.round(lim.share * 100)}% of ${lim.period} limit` : "";
     lines.push(`${label}: ${cells.join(" · ")}${flag}`);
   }
-  lines.push("", "Claude: what the runs would cost on the API (nothing is charged on the subscription, but it is what uses up its limits). GPT, Grok: tokens.");
   return lines.join("\n");
 }
 

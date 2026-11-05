@@ -229,9 +229,7 @@ export function settingsCommand(name, arg, current, { user } = {}) {
     case "limits": {
       if (!arg)
         return {
-          reply: `*Spend limits*\n${WORKERS.concat("jev")
-            .map((w) => `${w}: day ${amountText(s.limits[w]?.day)} · week ${amountText(s.limits[w]?.week)}${s.paused.includes(w) ? " · PAUSED" : ""}`)
-            .join("\n")}\n\n/limits worker day|week $5 or 500k (tokens) · /limits worker off · /limits pause worker · /limits unpause worker`,
+          reply: `*Limits* (in tokens: all are subscriptions)\n${WORKERS.map((w) => `${w}: day ${amountText(s.limits[w]?.day)} · week ${amountText(s.limits[w]?.week)}${s.paused.includes(w) ? " · PAUSED" : ""}`).join("\n")}\n\n/limits worker day|week 500k · /limits worker off · /limits pause worker · /limits unpause worker`,
         };
       if (words[0] === "pause" || words[0] === "unpause") {
         const w = workerOf(words[1]) ?? (words[1] === "jev" ? "jev" : null);
@@ -246,7 +244,8 @@ export function settingsCommand(name, arg, current, { user } = {}) {
         return done("limits", `No limits for ${w}.`);
       }
       const amount = parseAmount(words.slice(2).join(" "));
-      if (!["day", "week"].includes(words[1]) || !amount) return { reply: "/limits gpt week $20 · /limits grok day 500k" };
+      // Subscriptions: limits in tokens only, never money.
+      if (!["day", "week"].includes(words[1]) || !amount || amount.usd != null) return { reply: "/limits gpt week 2m · /limits grok day 500k (tokens)" };
       s.limits[w] = { ...(s.limits[w] ?? {}), [words[1]]: amount };
       return done("limits", `${w}: ${words[1]} limit ${amountText(amount)}.`);
     }
