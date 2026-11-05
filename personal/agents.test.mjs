@@ -79,6 +79,18 @@ test("Grok's answer, from the events of a real grok 1.0.70 run", () => {
   assert.deepEqual(r.result(), { text: "OK", session: "01a1a908", model: "grok-4.7-build", cost: null, usage: { in: 6429, out: 26 }, error: null });
   assert.equal(feedAll("grok", [{ type: "error", message: "not logged in" }]).result().error, "not logged in");
   assert.equal(feedAll("grok", [{ type: "end", stopReason: "rate_limited", sessionId: "s" }]).result().error, "rate_limited");
+  // Several rounds: the line before the tools is dropped, the answer kept, a last empty round changes nothing.
+  const rounds = feedAll("grok", [
+    { type: "available_commands" },
+    { type: "text", data: "I took over. Checking the docs." },
+    { type: "available_commands" },
+    { type: "available_commands" },
+    { type: "text", data: "Use GPT-6 " },
+    { type: "text", data: "for coding." },
+    { type: "available_commands" },
+    { type: "end", stopReason: "end_turn", sessionId: "s2" },
+  ]);
+  assert.equal(rounds.result().text, "Use GPT-6 for coding.");
 });
 
 test("every answer's last line: who, which model, effort, time", () => {

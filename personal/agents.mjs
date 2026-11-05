@@ -140,9 +140,18 @@ export function readerFor(provider, stepOf) {
     // the answer, {"type":"usage"}, then {"type":"end","sessionId","stopReason",
     // "usage","modelUsage":{"<model>":{…}}}; "available_commands" lists tools.
     // Tool and error events weren't in that run: read them loosely.
+    // Grok writes a line before each round of tool work ("I'll check X…") and
+    // the answer at the end; "available_commands" comes at every round. Only
+    // the last round's text is the answer.
     grok(ev) {
       const type = String(ev.type ?? "");
-      if (type === "text" && typeof ev.data === "string") r.parts.push(ev.data);
+      // A new round starts; its text replaces the round before (a round with no text, like the last one, keeps it).
+      if (type === "available_commands") r.newRound = true;
+      if (type === "text" && typeof ev.data === "string") {
+        if (r.newRound) r.parts = [];
+        r.newRound = false;
+        r.parts.push(ev.data);
+      }
       if (type === "end") {
         if (ev.sessionId) r.session = String(ev.sessionId);
         const models = Object.keys(ev.modelUsage ?? {});
