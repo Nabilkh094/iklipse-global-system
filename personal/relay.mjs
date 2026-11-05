@@ -94,7 +94,8 @@ const COMMANDS = new Set([
 
 /** {name, arg} for one of the relay's commands, or null for a request. */
 export function commandOf(text) {
-  const m = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(String(text ?? "").trim());
+  // "/model x" and "/ model x" (a space after the slash, as phones often type it).
+  const m = /^\/\s*([a-z]+)(?:\s+([\s\S]*))?$/i.exec(String(text ?? "").trim());
   if (!m || !COMMANDS.has(m[1].toLowerCase())) return null;
   return { name: m[1].toLowerCase(), arg: (m[2] ?? "").trim() };
 }
@@ -199,11 +200,19 @@ const BASE = [
   STATE_RULE,
 ].join(" ");
 
+/** How every answer is written, in every chat from its first message (caveman, always on). */
+const CAVEMAN = [
+  "Write every answer caveman, always, in every chat, every message: the answer first, no articles (a, an, the), no filler (just, really, basically, actually, simply), no pleasantries, no hedging, no greeting, no recap of the question, no sign-off.",
+  "Fragments are fine. Short words (big, not extensive; fix, not implement a solution for). Pattern: thing, action, reason, next step.",
+  'Keep every fact: names, numbers, dates, times with the zone, links, code, commands and error text exactly. Never drop "not", "no" or "only".',
+  "Drop caveman only for a security warning or before something that can't be undone; then back to caveman.",
+].join(" ");
+
 /** Told to the workers once the company bot is connected (bot.mjs). */
 const BOT_RULE = [
   "The company's own bot (iklipse, on WhatsApp, with the team's tools) can be asked from your shell:",
   '`iklipse-bot ask "question"` only reads (who is on the team, orders, clients, meetings, alerts, what was said) and prints its answer;',
-  '`iklipse-bot do "request"` (messages to people, reminders, meetings, posts, changes) asks Nabil for his go in the group first, then the bot does it.',
+  '`iklipse-bot do "request"` (messages to people, reminders, meetings, posts, changes) asks Nabil for his go in the group first, then the bot does it: tell him to say go, once; never ask do again for the same thing.',
   "Use what it answers as facts; never say the bot did something unless its answer says so. At most a few asks per request.",
 ].join(" ");
 
@@ -458,7 +467,7 @@ function main() {
       if (!existsSync(conf.bins[provider])) return finish({ failed: `${label(provider)} isn't installed on the server yet` });
       if (provider !== "claude" && !PROVIDERS[provider].login(home)) return finish({ failed: `${label(provider)} isn't signed in yet. On the server: sudo -iu ${conf.user} ${PROVIDERS[provider].signIn}` });
       const session = fresh ? null : (holder.sessions?.[provider] ?? null);
-      const system = systemFor(st.settings, provider, bot ? `${BASE} ${BOT_RULE}` : BASE);
+      const system = systemFor(st.settings, provider, `${BASE} ${CAVEMAN}${bot ? ` ${BOT_RULE}` : ""}`);
       // Codex has no system-prompt flag: the instructions open its session, and come again when they changed.
       const sysv = createHash("sha1").update(system).digest("hex").slice(0, 12);
       const tell = provider === "gpt" && (!session || holder.sysv?.gpt !== sysv);
@@ -957,13 +966,24 @@ function main() {
     if (isOwnerWord(body) && (/\d{4}/.test(body) || (replyKey && st.botOks[replyKey]))) {
       if (await bot.words(body)) return true;
     }
-    const asked = replyKey ? st.botAsks[replyKey] : null;
-    if (asked && isApproval(body)) {
-      delete st.botAsks[replyKey];
-      save();
-      void bot.send(asked.text).then((t) => botResult(t, ref, false));
-      await say("⏳ Sent to the bot.", ref, null).catch(() => {});
-      return true;
+    // His go to what a worker wanted the bot to do: a reply to that message, or a plain go
+    // when only one is waiting (the last 30 minutes); with several, he picks by replying.
+    if (isApproval(body)) {
+      const fresh = Object.entries(st.botAsks).filter(([, a]) => Date.now() - (a.at ?? 0) < 30 * MIN);
+      const key = replyKey && st.botAsks[replyKey] ? replyKey : !replyKey && fresh.length === 1 ? fresh[0][0] : null;
+      if (key) {
+        const asked = st.botAsks[key];
+        // The same request asked twice (two messages): one go sends it once.
+        for (const [k, a] of Object.entries(st.botAsks)) if (a.text === asked.text) delete st.botAsks[k];
+        save();
+        void bot.send(asked.text).then((t) => botResult(t, ref, false));
+        await say("⏳ Sent to the bot.", ref, null).catch(() => {});
+        return true;
+      }
+      if (!replyKey && fresh.length > 1) {
+        await say(`${fresh.length} requests wait for your go: reply go to the one you mean.`, ref, null).catch(() => {});
+        return true;
+      }
     }
     const was = replyKey ? st.botSent[replyKey] : null;
     if (was && body && !commandOf(body)) {
@@ -1003,6 +1023,9 @@ function main() {
             return out(200, { ok: t.state === "done", state: t.state, answer: resultText(t) });
           }
           if (req.url === "/do") {
+            if (Object.values(st.botAsks).some((a) => a.text === text && Date.now() - (a.at ?? 0) < 30 * MIN)) {
+              return out(200, { ok: true, waiting: true, answer: "Already waiting for Nabil's go in the group. Don't ask again: tell him to say go." });
+            }
             const ids = await say(`🤖 The master wants the company bot to:\n${text}\n\nReply *go* to this message to send it.`, null, null);
             for (const id of ids) st.botAsks[id] = { text, at: Date.now() };
             save();

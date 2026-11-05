@@ -22,6 +22,8 @@ test("the owner's new messages only, oldest first: not the server's own, not any
 test("the relay's commands with what follows them; a skill's /name and plain words go to Claude", () => {
   assert.deepEqual(commandOf(" /NEW "), { name: "new", arg: "" });
   assert.deepEqual(commandOf("/new Acme logo"), { name: "new", arg: "Acme logo" });
+  // A space after the slash, as phones type it: still the command.
+  assert.deepEqual(commandOf("/ model sonnet"), { name: "model", arg: "sonnet" });
   assert.deepEqual(commandOf("/switch #3"), { name: "switch", arg: "#3" });
   assert.deepEqual(commandOf("/plan build the\nreport"), { name: "plan", arg: "build the\nreport" });
   assert.equal(commandOf("/caveman"), null);
